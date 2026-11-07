@@ -444,7 +444,7 @@ def api_format_report():
                    count(*) AS n, coalesce(sum(size),0) AS bytes,
                    (array_agg(path ORDER BY id))[1] AS sample
             FROM files WHERE container_id IS NULL
-            GROUP BY 1,2,3 ORDER BY n DESC""")
+            GROUP BY 1,2 ORDER BY n DESC""")
 
     skip_set = set(ingest.settings().get("skip_exts") or [])
     buckets = {"unsupported": [], "parse_failed": [], "ocr_pending": [],
@@ -477,6 +477,61 @@ def api_format_report():
         "supported_exts": sorted(supported | archive_exts),
         "buckets": buckets,
         "totals": {k: total(v) for k, v in buckets.items()},
+    })
+
+
+@app.get("/api/policy-report")
+def api_policy_report():
+    """按 file_index_policies 出报表：每个文件为什么进/不进库，按原因码聚合。
+
+    与 /api/format-report 的区别：那个按扩展名猜"支持不支持"，
+    这个直接读策略表——是**实际决定**的记录，不是推断。
+    """
+    with db.cursor(commit=False) as con:
+        rows = con.run("""
+            SELECT p.policy, p.reason_code,
+                   array_to_string(array_agg(DISTINCT coalesce(p.reason_kind,'-')), ','),
+                   count(*) AS n, coalesce(sum(f.size),0) AS bytes,
+                   (array_agg(f.ext ORDER BY f.size DESC))[1] AS top_ext,
+                   (array_agg(f.path ORDER BY f.size DESC))[1:5] AS samples
+            FROM file_index_policies p JOIN files f ON f.id = p.file_id
+            GROUP BY 1,2 ORDER BY n DESC""")
+        unclassified = con.run("""
+            SELECT count(*) FROM files f LEFT JOIN file_index_policies p ON p.file_id=f.id
+            WHERE p.file_id IS NULL""")[0][0]
+
+    groups = []
+    for policy, code, kind, n, bts, top_ext, samples in rows:
+        groups.append({
+            "policy": policy, "reason_code": code, "reason_kind": kind,
+            "count": int(n), "mb": round(float(bts or 0) / 1048576, 1),
+            "top_ext": top_ext, "samples": list(samples or []),
+        })
+
+    by_policy, by_code = {}, {}
+    for g in groups:
+        by_policy[g["policy"]] = by_policy.get(g["policy"], 0) + g["count"]
+        by_code[g["reason_code"]] = by_code.get(g["reason_code"], 0) + g["count"]
+
+    # 需要人看的三类：不支持格式 / 待 OCR 的图片 / 解析失败
+    actionable = {
+        "unsupported": [g for g in groups if g["reason_code"].startswith("unsupported")],
+        "image_pending": [g for g in groups if g["reason_code"] == "image_needs_ocr"],
+        "failed": [g for g in groups if g["policy"] == "defer"],
+    }
+    import hashlib
+    sig = hashlib.sha256(
+        ("|".join(f"{g['reason_code']}:{g['count']}" for g in sorted(groups, key=lambda x: x["reason_code"]))).encode()
+    ).hexdigest()[:16]
+
+    return ok(report={
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "signature": sig,                       # 内容指纹：报表没变就不重复推送
+        "unclassified": int(unclassified),       # 必须为 0，否则说明有新文件绕过了策略表
+        "groups": groups,
+        "by_policy": by_policy,
+        "by_reason": by_code,
+        "actionable": actionable,
     })
 
 
