@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>墨脉 · 私有资料库</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">文</span>
+    <div>
+      <h1 id="site-title">墨脉</h1>
+      <p class="sub">vault 编译 · 论断溯源 · 语义检索</p>
+    </div>
+  </div>
+  <nav id="nav">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="pages">页面</button>
+    <button data-tab="search">检索</button>
+    <button data-tab="claims">论断</button>
+    <button data-tab="reports">看板</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+  <button id="btn-compile" class="primary">编译</button>
+</header>
+
+<main>
+  <!-- 概览 -->
+  <section id="tab-overview" class="tab active">
+    <div id="stat-grid" class="grid"></div>
+    <div class="panel">
+      <h2>论断健康度</h2>
+      <div id="health"></div>
+    </div>
+    <div class="panel">
+      <h2>最近编译</h2>
+      <table class="tbl" id="runs-table"><thead><tr>
+        <th>#</th><th>开始</th><th>结束</th><th>状态</th><th>页面</th><th>论断</th><th>分块</th><th>备注</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <!-- 页面 -->
+  <section id="tab-pages" class="tab">
+    <div class="toolbar">
+      <input id="page-q" placeholder="按标题或正文过滤…">
+      <select id="page-kind">
+        <option value="">全部类型</option>
+        <option value="entity">实体 entity</option>
+        <option value="concept">概念 concept</option>
+        <option value="synthesis">综述 synthesis</option>
+        <option value="source">来源 source</option>
+      </select>
+      <button id="btn-new-page">新建页面</button>
+    </div>
+    <div class="split">
+      <ul id="page-list" class="list"></ul>
+      <article id="page-view" class="doc">
+        <p class="muted">选择左侧页面查看</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- 检索 -->
+  <section id="tab-search" class="tab">
+    <div class="toolbar">
+      <input id="search-q" placeholder="输入问题或关键词…">
+      <select id="search-mode">
+        <option value="hybrid">混合（关键词+语义+论断）</option>
+        <option value="semantic">语义</option>
+        <option value="keyword">关键词</option>
+        <option value="claim">论断</option>
+      </select>
+      <button id="btn-search" class="primary">检索</button>
+    </div>
+    <div id="search-results"></div>
+  </section>
+
+  <!-- 论断 -->
+  <section id="tab-claims" class="tab">
+    <div class="toolbar">
+      <select id="claim-status">
+        <option value="">全部状态</option>
+        <option value="supported">supported</option>
+        <option value="contested">contested</option>
+        <option value="speculative">speculative</option>
+        <option value="refuted">refuted</option>
+      </select>
+      <input id="claim-q" placeholder="过滤论断文本…">
+    </div>
+    <table class="tbl" id="claims-table"><thead><tr>
+      <th>论断</th><th>状态</th><th>置信度</th><th>证据</th><th>新鲜度</th><th>页面</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <!-- 看板 -->
+  <section id="tab-reports" class="tab">
+    <div class="split">
+      <ul id="report-list" class="list"></ul>
+      <article id="report-view" class="doc"><p class="muted">选择左侧看板查看</p></article>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="tab">
+    <form id="settings-form" class="panel">
+      <h2>后端设置</h2>
+      <div class="fields" id="settings-fields"></div>
+      <div class="actions">
+        <button type="submit" class="primary">保存设置</button>
+        <span id="settings-msg" class="muted"></span>
+      </div>
+    </form>
+    <div class="panel">
+      <h2>新建 / 编辑页面</h2>
+      <div class="fields">
+        <label>页面 ID<input id="ed-id" placeholder="entity.xxx（留空自动生成）"></label>
+        <label>类型<select id="ed-kind">
+          <option value="entity">entity</option><option value="concept" selected>concept</option>
+          <option value="synthesis">synthesis</option><option value="source">source</option>
+        </select></label>
+        <label>标题<input id="ed-title" placeholder="页面标题"></label>
+        <label>别名（逗号分隔）<input id="ed-aliases" placeholder="墨脉, memory-wiki"></label>
+      </div>
+      <label class="block">论断 claims（YAML 列表，可留空）
+        <textarea id="ed-claims" rows="6" placeholder="- id: claim.demo.1
+  text: 这条论断的内容
+  status: supported
+  confidence: 0.9
+  evidence:
+    - kind: source-read
+      ref: 某文档第3页
+  updatedAt: 2026-11-07"></textarea>
+      </label>
+      <label class="block">正文 Markdown
+        <textarea id="ed-body" rows="12" placeholder="# 标题&#10;&#10;正文…"></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" id="btn-ed-save" class="primary">保存并编译</button>
+        <button type="button" id="btn-ed-clear">清空</button>
+        <span id="ed-msg" class="muted"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>NAS 10.10.10.2 · 端口 8800 · <span id="foot-status">…</span></footer>
+<script src="app.js"></script>
+</body>
+</html>

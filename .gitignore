@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行数据与产物
+*.db
+*.sqlite
+*.sqlite3
+results/
+*.log
+*.tmp
+
+# 凭据与本地配置
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 系统
+.DS_Store
+Thumbs.db
