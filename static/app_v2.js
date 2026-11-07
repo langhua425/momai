@@ -23,6 +23,7 @@ document.querySelectorAll("#nav button").forEach(b => {
     if (b.dataset.tab === "overview") loadStatus();
     if (b.dataset.tab === "graph") loadEntities();
     if (b.dataset.tab === "chat") initChat();
+    if (b.dataset.tab === "exclude") loadExclude();
   };
 });
 
@@ -669,3 +670,86 @@ async function doChat() {
 $("#btn-chat").onclick = doChat;
 $("#chat-mode").onchange = chatModeUI;
 $("#chat-input").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doChat(); } };
+
+/* ---------- 排除规则（T1.3） ---------- */
+const EX_LABEL = { dir: "目录", file: "文件", ext: "扩展名" };
+
+async function loadExclude() {
+  const body = $("#ex-body");
+  body.innerHTML = "<tr><td colspan=8 class=muted>加载中…</td></tr>";
+  try {
+    const j = await api("/api/exclude_rules");
+    if (!j.rules.length) {
+      body.innerHTML = "<tr><td colspan=8 class=empty>还没有排除规则。上面填一个目录或扩展名即可。</td></tr>";
+    } else {
+      body.innerHTML = j.rules.map(r => `
+        <tr>
+          <td>${r.id}</td>
+          <td>${EX_LABEL[r.kind] || r.kind}</td>
+          <td class="path" title="${esc(r.value)}">${esc(r.value)}</td>
+          <td>${esc(r.reason || "-")}</td>
+          <td>${fmtN(r.hits)}</td>
+          <td>${esc(r.last_hit || "-")}</td>
+          <td><input type="checkbox" data-ex-toggle="${r.id}" ${r.enabled ? "checked" : ""}></td>
+          <td><button class="mini danger" data-ex-del="${r.id}">删除</button></td>
+        </tr>`).join("");
+    }
+    body.querySelectorAll("[data-ex-toggle]").forEach(cb => {
+      cb.onchange = async () => {
+        try {
+          await api(`/api/exclude_rules/${cb.dataset.exToggle}`, {
+            method: "PUT", body: JSON.stringify({ enabled: cb.checked }) });
+        } catch (e) { alert("改启用状态失败：" + e.message); cb.checked = !cb.checked; }
+      };
+    });
+    body.querySelectorAll("[data-ex-del]").forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm("删除这条规则？删掉后重新扫描，被排除的文件会回到库里。")) return;
+        try {
+          await api(`/api/exclude_rules/${btn.dataset.exDel}`, { method: "DELETE" });
+          loadExclude();
+        } catch (e) { alert("删除失败：" + e.message); }
+      };
+    });
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan=8 class=muted>加载失败：${esc(e.message)}</td></tr>`;
+  }
+  loadIgnored();
+}
+
+async function addExcludeRule() {
+  const kind = $("#ex-kind").value;
+  const value = $("#ex-value").value.trim();
+  const reason = $("#ex-reason").value.trim();
+  if (!value) { alert("先把值填上"); return; }
+  try {
+    await api("/api/exclude_rules", { method: "POST",
+      body: JSON.stringify({ kind, value, reason }) });
+    $("#ex-value").value = ""; $("#ex-reason").value = "";
+    loadExclude();
+  } catch (e) { alert("添加失败：" + e.message); }
+}
+
+async function loadIgnored() {
+  const gbox = $("#ign-groups"), body = $("#ign-body");
+  body.innerHTML = "<tr><td colspan=4 class=muted>加载中…</td></tr>";
+  try {
+    const j = await api("/api/ignored?limit=100");
+    gbox.innerHTML = j.groups.map(g =>
+      `<span class="chip" title="${esc(g.reason_kind)}">${esc(g.reason_code)}
+         <b>${fmtN(g.count)}</b><i>${g.mb} MB</i></span>`).join("") ||
+      '<span class="muted">没有被忽略的文件</span>';
+    body.innerHTML = j.files.map(f => `
+      <tr>
+        <td title="${esc(f.path)}">${esc(f.name)}</td>
+        <td>${esc(f.reason_code)}</td>
+        <td class="muted" title="${esc(f.detail)}">${esc((f.detail || "").slice(0, 60))}</td>
+        <td>${fmtN(Math.round(f.kb))} KB</td>
+      </tr>`).join("") || "<tr><td colspan=4 class=muted>无</td></tr>";
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan=4 class=muted>加载失败：${esc(e.message)}</td></tr>`;
+  }
+}
+
+$("#btn-ex-add").onclick = addExcludeRule;
+$("#ex-value").addEventListener("keydown", e => { if (e.key === "Enter") addExcludeRule(); });

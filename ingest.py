@@ -259,6 +259,7 @@ def scan_targets(paths):
     with db.cursor(commit=False) as con:
         srcs = con.run("SELECT id, root_path FROM sources WHERE enabled")
     roots = [(sid, os.path.abspath(root)) for sid, root in srcs]
+    r_dirs, r_files, r_exts, _ = _load_exclude_rules()
     _skip_prefix = [os.path.abspath(s.get("unpack_dir") or ""),
                     os.path.abspath(s.get("md_dir") or "")]
     seen = added = gone = skipped = 0
@@ -267,6 +268,11 @@ def scan_targets(paths):
             continue
         sid = _path_source_id(p, roots)
         if not sid:
+            continue
+        _hit = _rule_match(p, p, r_dirs, r_files, r_exts)
+        if _hit:
+            _mark_excluded(sid, p, _hit[1])
+            skipped += 1
             continue
         if not os.path.exists(p):
             with db.cursor() as con:
@@ -355,8 +361,86 @@ def _policy_sync(fid):
             retry_policy.schedule(fid, detail, status, ext)
 
 
+def _mark_excluded(sid, p, rule_value):
+    """把「按规则排除」的文件记一行：可解释、可恢复（删规则后再扫就回来）。"""
+    fn = os.path.basename(p)
+    ext = os.path.splitext(fn)[1].lower()
+    try:
+        st = os.stat(p)
+        size, mt = st.st_size, datetime.fromtimestamp(st.st_mtime, timezone.utc)
+    except OSError:
+        return
+    note = f"按排除规则跳过：{rule_value}"
+    with db.cursor() as con:
+        r = con.run(
+            """INSERT INTO files(source_id,path,real_path,name,ext,size,mtime,status,error)
+               VALUES (:sid,:p,:rp,:n,:e,:sz,:mt,'skipped',:er)
+               ON CONFLICT (path) DO UPDATE SET status='skipped', error=:er, updated_at=now()
+               RETURNING id""",
+            sid=sid, p=p, rp=p, n=fn, e=ext, sz=size, mt=mt, er=note)
+    if r:
+        _policy_sync_fast(r[0][0], "never", "excluded_path", "policy", note)
+
+
+def _policy_sync_fast(fid, policy, code, rkind, detail):
+    with db.cursor() as con:
+        con.run("""INSERT INTO file_index_policies
+                     (file_id, policy, reason_code, reason_kind, reason_detail, attempts,
+                      max_attempts, next_retry_at, updated_at)
+                   VALUES (:i,:p,:c,:k,:d,0,4,NULL,now())
+                   ON CONFLICT (file_id) DO UPDATE SET
+                     policy=:p, reason_code=:c, reason_kind=:k, reason_detail=:d,
+                     attempts=0, next_retry_at=NULL, updated_at=now()""",
+                i=fid, p=policy, c=code, k=rkind, d=detail)
+
+
+def _load_exclude_rules():
+    """读用户排除规则 → (目录列表, 文件集合, 扩展名集合, id 映射)。"""
+    try:
+        with db.cursor(commit=False) as con:
+            rows = con.run("SELECT id, kind, value FROM exclude_rules WHERE enabled")
+    except Exception:
+        return [], set(), set(), {}
+    dirs, files, exts, by_value = [], set(), set(), {}
+    for rid, kind, value in rows:
+        if kind == "dir":
+            dirs.append(os.path.abspath(value))
+        elif kind == "file":
+            files.add(os.path.abspath(value))
+        elif kind == "ext":
+            v = value if value.startswith(".") else "." + value
+            exts.add(v.lower())
+        by_value[value] = rid
+    return dirs, files, exts, by_value
+
+
+def _bump_hits(counter):
+    """把本轮各规则命中数累加进 exclude_rules（一次一条 UPDATE，量很小）。"""
+    if not counter:
+        return
+    with db.cursor() as con:
+        for rid, n in counter.items():
+            con.run("""UPDATE exclude_rules SET hits = hits + :n, last_hit_at = now()
+                       WHERE id = :i""", n=n, i=rid)
+
+
+def _rule_match(path, base, dirs, files, exts):
+    """返回命中的规则 id（无命中返回 None）。dir 匹配整枝，file 精确，ext 按后缀。"""
+    ap = os.path.abspath(path)
+    if ap in files:
+        return ("file", ap)
+    if os.path.splitext(ap)[1].lower() in exts:
+        return ("ext", os.path.splitext(ap)[1].lower())
+    for d in dirs:
+        if ap == d or ap.startswith(d + os.sep):
+            return ("dir", d)
+    return None
+
+
 def scan(limit=0):
     s = settings()
+    r_dirs, r_files, r_exts, r_by_value = _load_exclude_rules()
+    rule_hits = {}
     skip = set(s["skip_exts"])
     max_bytes = int(s["max_file_mb"]) * 1024 * 1024
     with db.cursor(commit=False) as con:
@@ -373,14 +457,32 @@ def scan(limit=0):
         new_rows = []          # 本轮新增的 (id, path, name, size, mtime, ext)
         ex = [e for e in (exclude or []) if e]
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not any(x in os.path.join(dirpath, d) for x in ex)
-                           and not d.startswith(".git")]
+            _keep = []
+            for _d in dirnames:
+                _cand = os.path.join(dirpath, _d)
+                if any(x in _cand for x in ex) or _d.startswith(".git"):
+                    continue
+                _hit = _rule_match(_cand, root, r_dirs, r_files, r_exts)
+                if _hit:
+                    _rid = r_by_value.get(_hit[1])
+                    if _rid:
+                        rule_hits[_rid] = rule_hits.get(_rid, 0) + 1
+                    continue
+                _keep.append(_d)
+            dirnames[:] = _keep
             for fn in filenames:
                 p = os.path.join(dirpath, fn)
                 if any(pp and p.startswith(pp) for pp in _skip_prefix):
                     continue
                 # Office 临时锁文件（~$xxx.docx）和隐藏文件一律不入库
                 if fn.startswith("~$") or fn.startswith(".~lock") or fn.startswith("."):
+                    continue
+                _hit = _rule_match(p, root, r_dirs, r_files, r_exts)
+                if _hit:
+                    _rid = r_by_value.get(_hit[1])
+                    if _rid:
+                        rule_hits[_rid] = rule_hits.get(_rid, 0) + 1
+                    _mark_excluded(sid, p, _hit[1])
                     continue
                 info = _upsert_one(sid, p, skip, max_bytes)
                 if not info:
@@ -399,6 +501,7 @@ def scan(limit=0):
                     _save_scan_stats(seen, indexable, added)
                     return added
         _reconcile_moves(sid, root, new_rows, s)
+    _bump_hits(rule_hits)
     print(f"  扫描到 {seen} 个文件（可入库 {indexable}），新增记录: {added}")
     _save_scan_stats(seen, indexable, added)
     return added

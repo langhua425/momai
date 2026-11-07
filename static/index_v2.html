@@ -30,6 +30,7 @@
     <button data-tab="chat">对话</button>
     <button data-tab="graph">图谱</button>
     <button data-tab="files">文件</button>
+    <button data-tab="exclude">排除</button>
     <button data-tab="settings">设置</button>
   </nav>
   <span id="task-badge" class="badge">空闲</span>
@@ -149,6 +150,38 @@
       <div class="result" id="fd-summary" style="margin-top:12px"></div>
       <div id="fd-sections" style="margin-top:12px"></div>
       <div id="fd-chunks" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <section id="tab-exclude" class="tab">
+    <div class="panel">
+      <h2>排除规则</h2>
+      <div class="muted" style="margin-bottom:10px">
+        这里定义的规则在扫描时生效。目录规则整枝跳过（不逐文件建记录）；文件/扩展名规则会给每个被跳过的文件留一条可解释记录，
+        删掉规则后重新扫描即可恢复。
+      </div>
+      <div class="toolbar">
+        <select id="ex-kind">
+          <option value="dir">目录（整枝跳过）</option>
+          <option value="file">单个文件</option>
+          <option value="ext">扩展名</option>
+        </select>
+        <input id="ex-value" placeholder="目录/文件填绝对路径，扩展名填 .tmp" style="flex:1;min-width:280px">
+        <input id="ex-reason" placeholder="原因（可选）" style="flex:1;min-width:140px">
+        <button id="btn-ex-add" class="primary">添加</button>
+      </div>
+      <table class="tbl"><thead><tr>
+        <th>#</th><th>类型</th><th>值</th><th>原因</th><th>命中</th><th>最后命中</th><th>启用</th><th></th>
+      </tr></thead><tbody id="ex-body"></tbody></table>
+    </div>
+
+    <div class="panel">
+      <h2>当前被忽略的文件</h2>
+      <div class="muted" style="margin-bottom:8px">按原因码聚合，数据直接来自策略表（不另存一份真相）。</div>
+      <div id="ign-groups" class="chips"></div>
+      <table class="tbl"><thead><tr>
+        <th>名称</th><th>原因</th><th>说明</th><th>大小</th>
+      </tr></thead><tbody id="ign-body"></tbody></table>
     </div>
   </section>
 

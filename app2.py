@@ -535,6 +535,103 @@ def api_policy_report():
     })
 
 
+# ---------------- 排除规则（T1.3） ----------------
+
+@app.get("/api/exclude_rules")
+def api_exclude_rules():
+    """列出排除规则 + 命中计数。命中数：file/ext 规则=跳过文件数，dir 规则=整枝跳过次数。"""
+    with db.cursor(commit=False) as con:
+        rows = con.run("""SELECT id, kind, value, coalesce(reason,''), enabled, hits,
+                                 to_char(last_hit_at,'YYYY-MM-DD HH24:MI'), created_at
+                          FROM exclude_rules ORDER BY kind, id""")
+    rules = [{"id": r[0], "kind": r[1], "value": r[2], "reason": r[3], "enabled": r[4],
+              "hits": int(r[5] or 0), "last_hit": r[6],
+              "created_at": r[7].strftime("%Y-%m-%d %H:%M") if r[7] else None} for r in rows]
+    return ok(rules=rules,
+              kinds=[{"kind": "dir", "label": "目录（整枝跳过）"},
+                     {"kind": "file", "label": "单个文件"},
+                     {"kind": "ext", "label": "扩展名"}])
+
+
+@app.post("/api/exclude_rules")
+def api_exclude_rule_add():
+    d = request.get_json(force=True, silent=True) or {}
+    kind = (d.get("kind") or "dir").strip()
+    value = (d.get("value") or "").strip()
+    reason = (d.get("reason") or "").strip() or None
+    if kind not in ("dir", "file", "ext"):
+        return fail("kind 只能是 dir / file / ext")
+    if not value:
+        return fail("value 不能为空")
+    # 目录/文件必须存在：存一个不存在的路径等于给未来埋雷
+    if kind == "dir" and not os.path.isdir(value):
+        return fail(f"目录不存在：{value}")
+    if kind == "file" and not os.path.isfile(value):
+        return fail(f"文件不存在：{value}")
+    if kind == "ext" and not value.startswith("."):
+        value = "." + value
+    try:
+        with db.cursor() as con:
+            r = con.run("""INSERT INTO exclude_rules(kind, value, reason)
+                           VALUES (:k,:v,:r) ON CONFLICT (kind, value) DO NOTHING
+                           RETURNING id""", k=kind, v=value, r=reason)
+    except Exception as e:
+        return fail(f"写入失败：{e}")
+    if not r:
+        return fail("这条规则已存在")
+    return ok(id=r[0][0])
+
+
+@app.put("/api/exclude_rules/<int:rid>")
+def api_exclude_rule_update(rid):
+    d = request.get_json(force=True, silent=True) or {}
+    sets, params = [], {"i": rid}
+    if "enabled" in d:
+        sets.append("enabled=:e")
+        params["e"] = bool(d["enabled"])
+    if "reason" in d:
+        sets.append("reason=:r")
+        params["r"] = (d["reason"] or "").strip() or None
+    if not sets:
+        return fail("没有要改的字段")
+    with db.cursor() as con:
+        con.run(f"UPDATE exclude_rules SET {', '.join(sets)} WHERE id=:i", **params)
+    return ok(changed=rid)
+
+
+@app.delete("/api/exclude_rules/<int:rid>")
+def api_exclude_rule_delete(rid):
+    with db.cursor() as con:
+        con.run("DELETE FROM exclude_rules WHERE id=:i", i=rid)
+    return ok(deleted=rid)
+
+
+@app.get("/api/ignored")
+def api_ignored():
+    """当前被忽略的文件：按原因码聚合 + 明细。数据来自策略表，不另存一份真相。"""
+    limit = min(int(request.args.get("limit") or 100), 500)
+    reason = (request.args.get("reason") or "").strip()
+    where = "p.policy='never'"
+    params = {}
+    if reason:
+        where += " AND p.reason_code=:r"
+        params["r"] = reason
+    with db.cursor(commit=False) as con:
+        groups = con.run(f"""SELECT p.reason_code, coalesce(p.reason_kind,'-'), count(*),
+                                    round(sum(coalesce(f.size,0))/1048576.0, 1)
+                             FROM file_index_policies p JOIN files f ON f.id=p.file_id
+                             WHERE {where} GROUP BY 1,2 ORDER BY 3 DESC""", **params)
+        rows = con.run(f"""SELECT f.name, f.path, p.reason_code, coalesce(p.reason_detail,''),
+                                  round(coalesce(f.size,0)/1024.0, 1)
+                           FROM file_index_policies p JOIN files f ON f.id=p.file_id
+                           WHERE {where} ORDER BY f.size DESC NULLS LAST LIMIT :l""",
+                       l=limit, **params)
+    return ok(groups=[{"reason_code": g[0], "reason_kind": g[1], "count": int(g[2]),
+                       "mb": float(g[3] or 0)} for g in groups],
+              files=[{"name": r[0], "path": r[1], "reason_code": r[2],
+                      "detail": r[3], "kb": float(r[4] or 0)} for r in rows])
+
+
 # ---------------- 检索 ----------------
 
 @app.get("/api/search")
