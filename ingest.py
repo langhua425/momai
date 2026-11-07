@@ -206,6 +206,113 @@ def _reconcile_moves(sid, root, new_rows, s):
     return moved
 
 
+def _upsert_one(sid, p, skip, max_bytes):
+    """把单个磁盘文件 upsert 进 files（全量 walk 与增量事件共用这一段）。
+
+    返回 {id, is_new, ok, ext, st}；读不到/该忽略时返回 None。
+    """
+    fn = os.path.basename(p)
+    if fn.startswith("~$") or fn.startswith(".~lock") or fn.startswith("."):
+        return None
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    ext = os.path.splitext(fn)[1].lower()
+    ok = ext not in skip and st.st_size <= max_bytes
+    status = "pending" if ok else "skipped"
+    with db.cursor() as con:
+        r = con.run(
+            """INSERT INTO files(source_id,path,real_path,name,ext,size,mtime,status,error)
+               VALUES (:sid,:p,:rp,:n,:e,:sz,:mt,:st,:er)
+               ON CONFLICT (path) DO UPDATE SET
+                 size=EXCLUDED.size, mtime=EXCLUDED.mtime,
+                 status=CASE WHEN files.size<>EXCLUDED.size THEN EXCLUDED.status
+                             WHEN files.status IN ('pending','missing') THEN EXCLUDED.status
+                             ELSE files.status END,
+                 error=CASE WHEN files.size<>EXCLUDED.size THEN EXCLUDED.error ELSE files.error END,
+                 updated_at=now()
+               RETURNING id, (xmax = 0)""",
+            sid=sid, p=p, rp=p, n=fn, e=ext, sz=st.st_size,
+            mt=datetime.fromtimestamp(st.st_mtime, timezone.utc),
+            st=status, er=(None if ok else ("扩展名跳过" if ext in skip else "超出大小上限")))
+    return {"id": r[0][0] if r else None, "is_new": bool(r and r[0][1]),
+            "ok": ok, "ext": ext, "st": st}
+
+
+def _path_source_id(p, roots):
+    """路径归属哪个源：最长前缀匹配，避免嵌套源互相抢文件。"""
+    hits = [(len(r), sid) for sid, r in roots if p == r or p.startswith(r + os.sep)]
+    return max(hits)[1] if hits else None
+
+
+def scan_targets(paths):
+    """增量扫描：只处理事件队列给的路径。
+
+    与 `scan()` 的分工：这里**不 walk、不做 missing 全量判定**——
+    删除判定需要「本轮见过的完整集合」，只有全量 walk 才做得到。
+    事件负责及时性，全量负责一致性。
+    """
+    s = settings()
+    skip = set(s["skip_exts"])
+    max_bytes = int(s["max_file_mb"]) * 1024 * 1024
+    with db.cursor(commit=False) as con:
+        srcs = con.run("SELECT id, root_path FROM sources WHERE enabled")
+    roots = [(sid, os.path.abspath(root)) for sid, root in srcs]
+    _skip_prefix = [os.path.abspath(s.get("unpack_dir") or ""),
+                    os.path.abspath(s.get("md_dir") or "")]
+    seen = added = gone = skipped = 0
+    for p in paths:
+        if any(pp and p.startswith(pp) for pp in _skip_prefix):
+            continue
+        sid = _path_source_id(p, roots)
+        if not sid:
+            continue
+        if not os.path.exists(p):
+            with db.cursor() as con:
+                r = con.run("""UPDATE files SET status='missing',
+                                 error='磁盘上已不存在（事件队列）', updated_at=now()
+                               WHERE path=:p AND status<>'missing' RETURNING id""", p=p)
+            if r:
+                gone += 1
+                with db.cursor() as con:
+                    con.run("UPDATE chunks SET is_current=false WHERE file_id=:i AND is_current", i=r[0][0])
+                    con.run("""UPDATE file_index_policies SET policy='never', reason_code='source_missing',
+                                 reason_kind='policy', updated_at=now() WHERE file_id=:i""", i=r[0][0])
+            continue
+        info = _upsert_one(sid, p, skip, max_bytes)
+        if not info:
+            skipped += 1
+            continue
+        if info["ok"]:
+            seen += 1
+            added += 1 if info["is_new"] else 0
+        else:
+            skipped += 1
+    return {"seen": seen, "added": added, "gone": gone, "skipped": skipped}
+
+
+def drain_change_queue(limit=500):
+    """认领一批未处理事件（按代际顺序），返回去重后的路径。"""
+    with db.cursor() as con:
+        rows = con.run("""
+            UPDATE file_change_queue SET claimed_at=now()
+            WHERE id IN (SELECT id FROM file_change_queue
+                         WHERE processed_at IS NULL AND claimed_at IS NULL
+                         ORDER BY generation, id LIMIT :l)
+            RETURNING path""", l=limit)
+    return sorted({r[0] for r in rows})
+
+
+def finish_change_queue(paths):
+    if not paths:
+        return 0
+    with db.cursor() as con:
+        con.run("""UPDATE file_change_queue SET processed_at=now()
+                   WHERE processed_at IS NULL AND path = ANY(:ps)""", ps=list(paths))
+    return len(paths)
+
+
 def scan(limit=0):
     s = settings()
     skip = set(s["skip_exts"])
@@ -233,35 +340,17 @@ def scan(limit=0):
                 # Office 临时锁文件（~$xxx.docx）和隐藏文件一律不入库
                 if fn.startswith("~$") or fn.startswith(".~lock") or fn.startswith("."):
                     continue
-                try:
-                    st = os.stat(p)
-                except OSError:
+                info = _upsert_one(sid, p, skip, max_bytes)
+                if not info:
                     continue
                 seen += 1
-                _ext = os.path.splitext(fn)[1].lower()
-                if _ext not in skip and st.st_size <= max_bytes:
+                if info["ok"]:
                     indexable += 1
-                _ok = _ext not in skip and st.st_size <= max_bytes
-                _st = "pending" if _ok else "skipped"
-                with db.cursor() as con:
-                    r = con.run(
-                        """INSERT INTO files(source_id,path,real_path,name,ext,size,mtime,status,error)
-                           VALUES (:sid,:p,:rp,:n,:e,:sz,:mt,:st,:er)
-                           ON CONFLICT (path) DO UPDATE SET
-                             size=EXCLUDED.size, mtime=EXCLUDED.mtime,
-                             status=CASE WHEN files.size<>EXCLUDED.size THEN EXCLUDED.status
-                                         WHEN files.status IN ('pending','missing') THEN EXCLUDED.status
-                                         ELSE files.status END,
-                             error=CASE WHEN files.size<>EXCLUDED.size THEN EXCLUDED.error ELSE files.error END,
-                             updated_at=now()
-                           RETURNING id, (xmax = 0)""",
-                        sid=sid, p=p, rp=p, n=fn, e=_ext, sz=st.st_size,
-                        mt=datetime.fromtimestamp(st.st_mtime, timezone.utc),
-                        st=_st, er=(None if _ok else ("扩展名跳过" if _ext in skip else "超出大小上限")))
-                if r and r[0][1]:
+                if info["is_new"]:
                     added += 1
-                    new_rows.append((r[0][0], p, fn, st.st_size,
-                                     datetime.fromtimestamp(st.st_mtime, timezone.utc), _ext))
+                    new_rows.append((info["id"], p, fn, info["st"].st_size,
+                                     datetime.fromtimestamp(info["st"].st_mtime, timezone.utc),
+                                     info["ext"]))
                 if limit and added >= limit:
                     print(f"  达到上限 {limit}，停止扫描")
                     _reconcile_moves(sid, root, new_rows, s)
@@ -938,7 +1027,35 @@ def autoscan():
             pass
 
     print(f"===== 自动扫描 {now.astimezone().strftime('%Y-%m-%d %H:%M:%S')} =====")
-    added = scan(0)
+    # ① 事件队列（秒级延迟）：inotify 抓到的变动路径，只处理这些，不 walk 全树
+    inc = None
+    if s.get("watch_queue_enabled", True):
+        qpaths = drain_change_queue(500)
+        if qpaths:
+            inc = scan_targets(qpaths)
+            finish_change_queue(qpaths)
+            print(f"  增量事件 {len(qpaths)} 条：更新 {inc['seen']} / 新增 {inc['added']}"
+                  f" / 删除 {inc['gone']} / 忽略 {inc['skipped']}")
+
+    # ② 全量 walk 只按 full_scan_interval_min 跑 —— 它负责一致性（发现删除/移动），
+    #    事件负责及时性；两者职责不同，不能只留一个
+    full_every = int(s.get("full_scan_interval_min") or 30)
+    last_full = s.get("full_scan_last_at") or ""
+    do_full = True
+    if last_full:
+        try:
+            do_full = (now - _dt.fromisoformat(last_full)) >= _td(minutes=full_every - 1)
+        except Exception:
+            do_full = True
+    added = 0
+    if do_full:
+        added = scan(0)
+        with db.cursor() as con:
+            con.run("""INSERT INTO settings(key,value) VALUES ('full_scan_last_at',:v::jsonb)
+                       ON CONFLICT (key) DO UPDATE SET value=:v::jsonb, updated_at=now()""",
+                    v=json.dumps(now.isoformat(timespec="seconds")))
+    else:
+        print(f"  全量 walk 未到期（每 {full_every} 分钟一次），本轮只处理事件")
     # 注意：不能用 `x or 默认值` —— 0 本身就是合法值（不限），会被 or 吞掉
     def _limit(key, default):
         v = s.get(key)

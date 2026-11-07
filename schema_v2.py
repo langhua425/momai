@@ -199,6 +199,8 @@ DEFAULT_SETTINGS_V2 = {
     # 自动扫描（新增/变更文件自动入库 + 向量化）
     "auto_scan_enabled": True,
     "auto_scan_interval_min": 10,      # 定时器每 5 分钟醒一次，按此间隔判断是否该跑
+    "watch_queue_enabled": True,        # inotify 事件队列（秒级增量）
+    "full_scan_interval_min": 30,       # 全量 walk 周期：只管一致性（删除/移动）
     "auto_index_on_scan": True,        # 扫描后自动解析 + 嵌入
     "auto_index_limit": 0,             # 0 = 不限（纯排队，跑完为止）
     "auto_ocr_enabled": True,          # 扫描件自动送 mineru
