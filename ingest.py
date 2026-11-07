@@ -289,6 +289,7 @@ def scan_targets(paths):
             added += 1 if info["is_new"] else 0
         else:
             skipped += 1
+            _policy_sync(info["id"])      # 被跳过的也要有「为什么」，不能只在 index 里补
     return {"seen": seen, "added": added, "gone": gone, "skipped": skipped}
 
 
@@ -311,6 +312,47 @@ def finish_change_queue(paths):
         con.run("""UPDATE file_change_queue SET processed_at=now()
                    WHERE processed_at IS NULL AND path = ANY(:ps)""", ps=list(paths))
     return len(paths)
+
+
+def _policy_sync(fid):
+    """把 files 的最终状态投影到 file_index_policies（流水线每处理完一个文件调一次）。
+
+    没有这一步，策略表只在回填时准过一次：新入库的文件永远没有记录（unclassified 涨），
+    新失败的文件也进不了重试机制。
+    """
+    with db.cursor(commit=False) as con:
+        row = con.run("""SELECT status, coalesce(parse_kind,''), coalesce(error,''),
+                                coalesce(ext,''), coalesce(size,0)
+                         FROM files WHERE id=:i""", i=fid)
+    if not row:
+        return
+    status, kind, err, ext, size = row[0]
+
+    def _put(policy, code, rkind, detail=None):
+        with db.cursor() as con:
+            con.run("""INSERT INTO file_index_policies
+                         (file_id, policy, reason_code, reason_kind, reason_detail, attempts,
+                          max_attempts, next_retry_at, updated_at)
+                       VALUES (:i,:p,:c,:k,:d,0,4,NULL,now())
+                       ON CONFLICT (file_id) DO UPDATE SET
+                         policy=:p, reason_code=:c, reason_kind=:k, reason_detail=:d,
+                         attempts=0, next_retry_at=NULL, updated_at=now()""",
+                    i=fid, p=policy, c=code, k=rkind, d=detail)
+
+    if status == "parsed":
+        _put("indexed", "indexed_ok", "content", kind)
+    elif status == "duplicate":
+        _put("never", "duplicate_content", "content", err)
+    elif status == "missing":
+        _put("never", "source_missing", "policy", err or "磁盘上已不存在")
+    else:
+        # skipped / failed 交给重试机制分类（poison 一次判死，transient 排退避）
+        import retry_policy
+        detail = err or ("扩展名跳过" if status == "skipped" else "解析失败")
+        if size and size > 50 * 1024 * 1024 and ext in (".xls", ".doc", ".ppt"):
+            _put("never", "poison_oversize", "poison", f"体积异常 {size} 字节")
+        else:
+            retry_policy.schedule(fid, detail, status, ext)
 
 
 def scan(limit=0):
@@ -718,7 +760,9 @@ def index(limit=0, do_embed=True):
                LIMIT :lim""",
             lim=(limit or 10**9))
     done = unpacked = failed = dup = 0
+    processed_ids = []
     for fid, lpath, rpath, name, ext, size, cid, depth, mt, plen in rows:
+        processed_ids.append(fid)
         def _canon_rank(_mt, _plen, _id):
             """正本优先级：文件本身越旧越正、路径越短越正、入库越早越正。"""
             return (_mt.timestamp() if _mt else 0, _plen or len(lpath or ""), _id)
@@ -861,6 +905,12 @@ def index(limit=0, do_embed=True):
         write_md(fid, text, s, meta_note=f"{kind} {note}".strip())
         done += 1
 
+    # 策略表必须随流水线走：否则新入库/新失败的文件的「为什么」永远没有记录
+    for _fid in processed_ids:
+        try:
+            _policy_sync(_fid)
+        except Exception as _e:
+            print(f"  ! 策略同步失败 {_fid}: {_e}")
     print(f"  处理完成: {done} 个文件 | 解包新增: {unpacked} | 失败: {failed} | 内容重复跳过: {dup}")
 
 
