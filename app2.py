@@ -424,60 +424,205 @@ def _legacy_ocr_body():
     return ok(started="ocr")
 
 
+@app.get("/api/invariants")
+def api_invariants():
+    """不变量体检：给看门狗吃的**判定依据**，不是给人看的报表。
+
+    设计原则：这里只返回**能判定健康/不健康的事实**（计数、时长、偏差），
+    不含任何"解释"。解释和播报交给看门狗，服务端不猜阈值——
+    阈值随规模变化，写死在服务里迟早要改两处。
+
+    每一项都对应一类静默故障：
+      policies_missing   有文件绕过策略表 → 报表从此不可信
+      qdrant_drift       双写失步 → 检索少内容，界面完全正常
+      embedding_broken   向量空/维数不对 → 静默漏检
+      queue_stuck        worker 挂了 → 队列涨但没人处理
+      stalled_*          夜间批跑失效
+    """
+    out = {}
+    try:
+        with db.cursor(commit=False) as con:
+            out["files"] = int(con.run("SELECT count(*) FROM files")[0][0])
+            out["policies"] = int(con.run("SELECT count(*) FROM file_index_policies")[0][0])
+            out["unclassified"] = int(con.run("""
+                SELECT count(*) FROM files f
+                WHERE NOT EXISTS (SELECT 1 FROM file_index_policies p WHERE p.file_id=f.id)""")[0][0])
+            out["chunks_current"] = int(con.run("SELECT count(*) FROM chunks WHERE is_current")[0][0])
+            out["embedding_null"] = int(con.run("""
+                SELECT count(*) FROM chunks WHERE is_current AND embedding IS NULL""")[0][0])
+            out["embedding_dim_bad"] = int(con.run("""
+                SELECT count(*) FROM chunks
+                WHERE is_current AND embedding IS NOT NULL AND vector_dims(embedding) <> 1024""")[0][0])
+            out["files_pending"] = int(con.run("""
+                SELECT count(*) FROM files WHERE status IN ('pending','defer')""")[0][0])
+            out["files_failed"] = int(con.run("""
+                SELECT count(*) FROM files WHERE status='failed'""")[0][0])
+            h = con.run("""
+                SELECT count(*) FILTER (WHERE status='parsed'), count(*) FILTER (WHERE status='failed')
+                FROM files WHERE updated_at > now() - interval '1 hour'""")[0]
+            out["last_hour_parsed"], out["last_hour_failed"] = int(h[0] or 0), int(h[1] or 0)
+
+            q = con.run("""
+                SELECT count(*), coalesce(extract(epoch FROM now()-min(observed_at)),0)
+                FROM file_change_queue WHERE processed_at IS NULL""")[0]
+            out["change_queue_pending"], out["change_queue_oldest_sec"] = int(q[0]), int(q[1] or 0)
+
+            o = con.run("""
+                SELECT count(*), coalesce(extract(epoch FROM now()-min(enqueued_at)),0)
+                FROM ocr_queue WHERE status IN ('pending','processing')""")[0]
+            out["ocr_queue_pending"], out["ocr_queue_oldest_sec"] = int(o[0]), int(o[1] or 0)
+
+            r = con.run("""
+                SELECT count(*) FROM file_index_policies
+                WHERE next_retry_at IS NOT NULL AND next_retry_at < now() - interval '2 hours'""")[0]
+            out["retry_overdue"] = int(r[0])
+
+            cov = con.run("""
+                SELECT (SELECT count(*) FROM doc_summaries),
+                       (SELECT count(DISTINCT file_id) FROM doc_summaries),
+                       (SELECT count(*) FROM files WHERE status='parsed')""")[0]
+            out["summaries"], out["summaries_files"], out["parsed_files"] = (
+                int(cov[0] or 0), int(cov[1] or 0), int(cov[2] or 0))
+            ent = con.run("SELECT count(*) FROM entities")[0][0]
+            out["entities"] = int(ent)
+    except Exception as e:
+        return fail(f"不变量取数失败：{type(e).__name__}: {e}", 500)
+
+    # Qdrant 点数：与 current 块比，差值是双写健康度
+    s = ingest.settings()
+    try:
+        import qdrant_store as qs
+    except Exception as e:                                   # noqa: BLE001
+        qs = None
+        out["qdrant_error"] = f"模块导入失败: {e}"[:200]
+    out["qdrant_enabled"] = bool(qs and qs.enabled(s))
+    if out["qdrant_enabled"]:
+        try:
+            hh = qs.health(s) or {}
+            out["qdrant_points"] = int(hh.get("points") or hh.get("points_count") or 0)
+            out["qdrant_drift"] = out["chunks_current"] - out["qdrant_points"]
+            out["qdrant_drift_pct"] = round(
+                100.0 * abs(out["qdrant_drift"]) / max(out["chunks_current"], 1), 2)
+        except Exception as e:
+            out["qdrant_error"] = f"{type(e).__name__}: {e}"[:200]
+    out["server_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return ok(invariants=out)
+
+
 @app.get("/api/format-report")
 def api_format_report():
-    """格式体检：哪些格式没被识别、哪些根本不支持（按扩展名聚合 + 样本路径）。"""
+    """格式体检：按「能不能解析」给每个扩展名定性 + 列出不支持但库里有文件的格式。
+
+    纪律（踩过一次 500）：
+    ① **不再硬引用常量名**。此前的实现直接读 `X.HTML_EXTS / X.MHTML_EXTS / X.RTF_EXTS /
+       X.DBF_EXTS / X.ODF_EXTS`，这些在 extract.py 里根本不存在 → 接口 100% 500，
+       看门狗连续报警三天都没人发现是代码问题而不是数据问题。
+       现在统一走 `getattr(X, 名字, None)`，取不到就跳过，并回报实际用了哪些分组。
+    ② **算不出来就回缓存**，不把 500 甩给调用方。缓存里带 `cached_at` 与 `stale:true`，
+       看门狗据此区分「数据有问题」与「接口暂时不可用」。
+    """
+    # 缓存目录：优先环境变量，其次 md_dir 同级（都在 /tank/files 下，随备份一起走）
+    _md = ""
+    try:
+        _md = (ingest.settings() or {}).get("md_dir") or ""
+    except Exception:
+        _md = ""
+    cache_dir = os.environ.get("MOMAI_CACHE_DIR") or (
+        os.path.join(os.path.dirname(_md), "wenmai-cache") if _md else "/tank/files/wenmai-cache")
+    cache_path = os.path.join(cache_dir, "format_report.json")
+
+    try:
+        report = _compute_format_report()
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False)
+        except Exception as e:
+            report["cache_write_error"] = str(e)[:200]
+        return ok(report=report)
+    except Exception as e:
+        if os.path.exists(cache_path):
+            try:
+                cached = json.load(open(cache_path, encoding="utf-8"))
+                cached["stale"] = True
+                cached["stale_reason"] = f"{type(e).__name__}: {e}"[:300]
+                cached["served_from_cache"] = True
+                return ok(report=cached)
+            except Exception:
+                pass
+        return fail(f"格式报表生成失败，且无可用缓存：{type(e).__name__}: {e}")
+
+
+def _compute_format_report():
     import extract as X
 
+    groups_used, missing = [], []
     supported = set()
-    for s in (X.TEXT_EXTS, X.HTML_EXTS, X.MHTML_EXTS, X.RTF_EXTS, X.DBF_EXTS,
-              X.PDF_EXTS, X.ODF_EXTS, X.LEGACY_OFFICE):
-        supported |= s
-    supported |= set(X.OOXML_DISPATCH) | {".ofd"}
-    unsupportable = set(getattr(X, "UNSUPPORTABLE", {}))
-    archive_exts = set(archives.ARCHIVE_EXTS) if hasattr(archives, "ARCHIVE_EXTS") else set()
+    for name in ("TEXT_EXTS", "HTML_EXTS", "MHTML_EXTS", "RTF_EXTS", "DBF_EXTS",
+                 "PDF_EXTS", "ODF_EXTS", "LEGACY_OFFICE", "OFFICE_EXTS", "IMAGE_EXTS"):
+        val = getattr(X, name, None)
+        if isinstance(val, (set, list, tuple)):
+            supported |= set(val)
+            groups_used.append(name)
+        else:
+            missing.append(name)
+    dispatch = getattr(X, "OOXML_DISPATCH", None)
+    if isinstance(dispatch, dict):
+        supported |= set(dispatch)
+        groups_used.append("OOXML_DISPATCH")
+    supported |= {".ofd"}
+    unsupportable = dict(getattr(X, "UNSUPPORTABLE", {}) or {})
 
     with db.cursor(commit=False) as con:
         rows = con.run("""
-            SELECT coalesce(ext,'-') AS ext,
-                   status, coalesce(parse_kind,'-') AS kind,
-                   count(*) AS n, coalesce(sum(size),0) AS bytes,
-                   (array_agg(path ORDER BY id))[1] AS sample
-            FROM files WHERE container_id IS NULL
-            GROUP BY 1,2 ORDER BY n DESC""")
+            SELECT coalesce(ext,'-') AS ext, status,
+                   coalesce(parse_kind,'-') AS kind, count(*) AS n,
+                   coalesce(sum(size),0) AS bytes,
+                   (array_agg(path ORDER BY path))[1] AS sample
+            FROM files GROUP BY 1,2,3 ORDER BY n DESC""")
+        pol = con.run("""SELECT policy, reason_code, count(*) FROM file_index_policies
+                         GROUP BY 1,2 ORDER BY 3 DESC""")
 
-    skip_set = set(ingest.settings().get("skip_exts") or [])
-    buckets = {"unsupported": [], "parse_failed": [], "ocr_pending": [],
-               "skipped_by_rule": [], "pending": [], "duplicate": [], "ok": []}
+    by_ext = {}
     for ext, status, kind, n, bts, sample in rows:
-        item = {"ext": ext, "status": status, "kind": kind, "count": n,
-                "mb": round(float(bts or 0) / 1048576, 1), "sample": sample}
-        # 先按扩展名定性：根本不支持 / 按规则跳过 / 支持
-        if ext in unsupportable or (ext not in supported and ext not in archive_exts
-                                    and ext not in skip_set):
-            buckets["unsupported"].append(item)
-        elif status == "parsed":
-            buckets["ok"].append(item)
-        elif kind == "pdf-scan":
-            buckets["ocr_pending"].append(item)
-        elif status == "pending":
-            buckets["pending"].append(item)
-        elif status == "duplicate":
-            buckets["duplicate"].append(item)
+        e = by_ext.setdefault(ext, {"ext": ext, "files": 0, "mb": 0.0, "parsed": 0,
+                                    "skipped": 0, "failed": 0, "pending": 0,
+                                    "kinds": [], "sample": sample})
+        e["files"] += int(n)
+        e["mb"] = round(e["mb"] + float(bts or 0) / 1048576, 1)
+        if status in ("parsed", "duplicate"):
+            e["parsed"] += int(n)
         elif status == "skipped":
-            buckets["skipped_by_rule"].append(item)
+            e["skipped"] += int(n)
+        elif status == "failed":
+            e["failed"] += int(n)
         else:
-            buckets["parse_failed"].append(item)
+            e["pending"] += int(n)
+        if kind not in ("-", None) and kind not in e["kinds"]:
+            e["kinds"].append(kind)
 
-    def total(lst):
-        return {"files": sum(x["count"] for x in lst), "mb": round(sum(float(x["mb"]) for x in lst), 1)}
+    parsed_ok = [e for e in by_ext.values() if e["parsed"] > 0]
+    # 「不支持」的判据用实测结果，不是靠清单猜：解析成功过就是支持
+    unsupported = [e for e in by_ext.values()
+                   if e["parsed"] == 0 and (e["failed"] + e["skipped"]) > 0
+                   and e["ext"] not in supported]
 
-    return ok(report={
+    return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "supported_exts": sorted(supported | archive_exts),
-        "buckets": buckets,
-        "totals": {k: total(v) for k, v in buckets.items()},
-    })
+        "stale": False,
+        "supported_ext_count": len(supported),
+        "groups_used": groups_used,
+        "groups_missing": missing,          # 显式暴露：常量改名/缺失会立刻看得见
+        "parsed_exts": sorted((e["ext"] for e in parsed_ok)),
+        "unsupported": sorted(
+            ({"ext": e["ext"], "files": e["files"], "mb": e["mb"],
+              "failed": e["failed"], "skipped": e["skipped"], "sample": e["sample"]}
+             for e in unsupported), key=lambda x: -x["files"]),
+        "by_ext": sorted(by_ext.values(), key=lambda x: -x["files"]),
+        "policies": [{"policy": p[0], "reason_code": p[1], "count": int(p[2])} for p in pol],
+        "unsupportable_hint": unsupportable,
+        "note": "被排除的格式见 /api/policy-report 的 policy=never/out_of_scope_*",
+    }
 
 
 @app.get("/api/policy-report")

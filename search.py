@@ -88,6 +88,57 @@ def _qdrant_semantic(qv, ext, limit, s):
     return out
 
 
+def _name_channel(q, ext, limit):
+    """文件名字段召回：解决「我记得有这么个文件」这个最高频场景。
+
+    为什么单独一路而不是塞进 content：实测把文件名拼进块文本（meta 前缀）后，
+    按名字找文件 0.237→0.562，但段落检索 MRR 0.380→0.306 —— 所有块共享同一段
+    前缀会把同文档各块拉得互相靠近，块级区分度被抹平。字段匹配没有这个副作用。
+
+    排序：整句 trgm 相似度优先，其次分词命中数。
+    """
+    kw = (q or "").strip()
+    if len(kw) < 3:
+        return []
+    ts = seg.terms(q) or []
+    params = {"q": kw, "l": limit, "kw": f"%{kw}%"}
+    ext_sql = ""
+    if ext:
+        ext_sql = " AND f.ext = :ext"
+        params["ext"] = ext
+    # 每份文件只取一块（seq 最小），否则同一文件会占满名额
+    sql = f"""
+        WITH hit AS (
+            SELECT f.id AS file_id,
+                   greatest(similarity(f.name, :q), 0.6 * similarity(coalesce(f.path,''), :q)) AS sim,
+                   (f.name ILIKE :kw) AS exact
+            FROM files f
+            WHERE f.status = 'parsed' AND (f.name ILIKE :kw OR coalesce(f.path,'') ILIKE :kw
+                  OR similarity(f.name, :q) > 0.18){ext_sql}
+            ORDER BY exact DESC, sim DESC
+            LIMIT :l
+        )
+        SELECT c.id, c.file_id, f.name, f.ext, f.path, coalesce(f.parse_kind,''),
+               c.seq, coalesce(c.heading,''), coalesce(c.section_path,''),
+               coalesce(c.content,''), h.sim
+        FROM hit h
+        JOIN files f ON f.id = h.file_id
+        JOIN chunks c ON c.file_id = h.file_id AND c.is_current
+        WHERE c.seq = (SELECT min(c2.seq) FROM chunks c2
+                        WHERE c2.file_id = h.file_id AND c2.is_current)
+        ORDER BY h.exact DESC, h.sim DESC"""
+    with db.cursor(commit=False) as con:
+        rows = con.run(sql, **params)
+    out = []
+    for r in rows:
+        out.append({"chunk_id": r[0], "id": r[0], "file_id": r[1], "name": r[2], "ext": r[3],
+                    "path": r[4], "parse_kind": r[5], "seq": r[6], "heading": r[7],
+                    "section_path": r[8], "snippet": (r[9] or "")[:600],
+                    "content": (r[9] or ""), "vscore": 0.0,
+                    "kscore": float(r[10] or 0), "khits": 0, "name_hit": True})
+    return out
+
+
 def _keyword(q, ext, limit):
     """按分词结果做 OR 匹配：命中词数优先，其次整句 trgm 相似度。
 
@@ -178,6 +229,17 @@ def search(q, mode="hybrid", limit=20, ext="", do_rerank=None):
     if mode in ("hybrid", "keyword"):
         kw_rows = _keyword(q, ext, cand)
         lists.append(kw_rows); weights.append(1.0); routes["keyword"] = len(kw_rows)
+
+        # 名字通道（独立一路）：正文向量不承担「文件身份」，避免块级区分度被前缀抹平
+        if s.get("name_recall_enabled", True):
+            try:
+                nm_rows = _name_channel(q, ext, max(10, cand // 3))
+                if nm_rows:
+                    lists.append(nm_rows)
+                    weights.append(float(s.get("name_recall_weight", 1.2) or 1.2))
+                    routes["name_field"] = len(nm_rows)
+            except Exception as e:                            # noqa: BLE001
+                err = (err + "；" if err else "") + f"名字通道跳过: {e}"
 
     rows = _rrf(lists, weights) if len(lists) > 1 else (lists[0] if lists else [])
     rows.sort(key=lambda x: -x.get("score", 0))
