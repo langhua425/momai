@@ -611,7 +611,7 @@ async function chatStream(txt, out) {
   const card = el("div", "result");
   const head = el("div", "h");
   head.append(el("span", "title", "回答"));
-  const badge = el("span", "badge", "检索中…");
+  const badge = el("span", "badge claim evidence", "检索中…");
   head.append(badge);
   card.append(head);
   const body = el("div");
