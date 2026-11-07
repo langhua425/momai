@@ -12,6 +12,7 @@ import json
 
 import db
 import search as wm_search
+import assistant as wm_assistant
 
 SERVER_NAME = "wenmai-lingxi"
 SERVER_VERSION = "1.0.0"
@@ -43,6 +44,46 @@ TOOLS = [
                 "path": {"type": "string"},
                 "max_chars": {"type": "integer", "default": 8000, "maximum": 60000},
             },
+        },
+    },
+    {
+        "name": "momai_chat",
+        "description": "对资料库提问：先多路召回证据，再由本地模型作答，答案带 [n] 引用。"
+                       "适合「这份资料里 X 是怎么规定的」这类需要综合多份文件的问题。"
+                       "注意：本地模型生成需 15–90 秒，比检索慢得多；只要事实不要解释时用 momai_search。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "要问的问题"},
+                "history": {
+                    "type": "array",
+                    "description": "可选的历史消息（最近 6 条生效），用于多轮追问",
+                    "items": {
+                        "type": "object",
+                        "properties": {"role": {"type": "string", "enum": ["user", "assistant"]},
+                                       "content": {"type": "string"}},
+                    },
+                },
+                "mode": {"type": "string", "enum": ["hybrid", "semantic", "keyword"], "default": "hybrid"},
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "momai_draft",
+        "description": "按公文文体起草稿件：只用资料库事实，缺的要素一律输出【待补：xx】而不编造。"
+                       "文种 report=报告 request=请示 summary=总结 plan=方案 notice=通知 letter=函。"
+                       "生成需 30–120 秒。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "主题"},
+                "kind": {"type": "string",
+                         "enum": ["report", "request", "summary", "plan", "notice", "letter"],
+                         "default": "report"},
+                "points": {"type": "string", "description": "必须覆盖的要点（可空）"},
+            },
+            "required": ["topic"],
         },
     },
 ]
@@ -101,15 +142,54 @@ def _read_document(args):
 
 
 def call_tool(name, args):
-    if name == "lingxi_search":
-        q = (args.get("query") or "").strip()
+    if name in ("momai_search", "lingxi_search"):
+        q = (args.get("query") or args.get("q") or "").strip()
         if not q:
             return "query 不能为空", True
         res = wm_search.search(q, mode=args.get("mode") or "hybrid",
                                limit=int(args.get("limit") or 8), ext=args.get("ext") or "")
         return _fmt_search(res), False
-    if name == "lingxi_read_document":
+    if name in ("momai_read_document", "lingxi_read_document"):
         return _read_document(args), False
+    if name == "momai_chat":
+        q = (args.get("question") or "").strip()
+        if not q:
+            return "question 不能为空", True
+        hist = args.get("history")
+        if not isinstance(hist, list):
+            hist = []
+        try:
+            r = wm_assistant.answer(q, history=hist, mode=args.get("mode") or "hybrid")
+        except Exception as e:                                  # noqa: BLE001
+            return f"生成失败：{type(e).__name__}: {e}", True
+        if not r.get("refs"):
+            return r.get("answer") or "资料中未找到相关内容。", False
+        lines = [r.get("answer") or "", "", "---", "引用："]
+        for ref in r["refs"]:
+            sec = f" · {ref['section_path']}" if ref.get("section_path") else ""
+            lines.append(f"[{ref['n']}] {ref['name']}{sec} — {ref.get('path')}")
+        lines.append(f"（证据 {r.get('evidence_chars', 0)} 字）")
+        return "\n".join(lines), False
+    if name == "momai_draft":
+        topic = (args.get("topic") or "").strip()
+        if not topic:
+            return "topic 不能为空", True
+        kind = args.get("kind") or "report"
+        if kind not in wm_assistant.KINDS:
+            return f"未知文种 {kind}，可选：{', '.join(wm_assistant.KINDS)}", True
+        try:
+            r = wm_assistant.draft(topic, kind=kind, points=args.get("points") or "")
+        except Exception as e:                                  # noqa: BLE001
+            return f"起草失败：{type(e).__name__}: {e}", True
+        body = r.get("draft") or ""
+        n_missing = body.count("【待补")
+        lines = [f"# {r.get('kind_name', kind)}：{topic}", "", body, ""]
+        if r.get("refs"):
+            lines.append("---")
+            lines.append(f"引用 {len(r['refs'])} 份，待补要素 {n_missing} 处：")
+            for ref in r["refs"]:
+                lines.append(f"[{ref['n']}] {ref['name']} — {ref.get('path')}")
+        return "\n".join(lines), False
     return f"未知工具: {name}", True
 
 
