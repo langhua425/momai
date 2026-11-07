@@ -120,6 +120,65 @@ def _collect(q, s, limit=REF_LIMIT, mode="hybrid"):
     return "\n\n".join(parts), refs
 
 
+def _chat_stream(base, model, messages, timeout=300, max_tokens=2600, temperature=0.2):
+    """逐片产出正文，供 SSE 转发。
+
+    两个坑：
+    ① **不能在整个流期间持 _LOCK** —— 那会把并发请求全排到流结束；
+       只有 ink 建连需要串行（8001 并发=1），拿到响应对象就放锁。
+    ② 推理模型会把思考塞进 `reasoning_content`。正文有内容时**不转发**思考，
+       否则用户会看到一堆内心独白；只有整轮都没有正文时才回退到思考内容。
+    """
+    body = json.dumps({
+        "model": model, "messages": messages, "temperature": temperature,
+        "max_tokens": max_tokens, "stream": True,
+    }, ensure_ascii=False).encode()
+    req = urllib.request.Request(_endpoint(base), data=body,
+                                 headers={"Content-Type": "application/json"})
+    with _LOCK:
+        r = urllib.request.urlopen(req, timeout=timeout)
+    think_buf = []
+    emitted = False
+    try:
+        for raw in r:
+            line = raw.decode("utf-8", "ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                d = json.loads(data)
+            except Exception:                                  # noqa: BLE001
+                continue
+            delta = (d.get("choices") or [{}])[0].get("delta") or {}
+            piece = delta.get("content") or ""
+            if piece:
+                emitted = True
+                yield piece
+            elif delta.get("reasoning_content"):
+                think_buf.append(delta["reasoning_content"])
+    finally:
+        try:
+            r.close()
+        except Exception:                                      # noqa: BLE001
+            pass
+    if not emitted and think_buf:
+        yield "".join(think_buf)
+
+
+def _build_msgs(question, ctx, history=None):
+    """对话消息体：answer() 与流式接口共用，避免两处 prompt 漂移。"""
+    msgs = [{"role": "system", "content": SYS_CHAT}]
+    for h in (history or [])[-6:]:
+        role = h.get("role")
+        content = (h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            msgs.append({"role": role, "content": content[:1500]})
+    msgs.append({"role": "user", "content": f"【资料】\n{ctx}\n\n【问题】\n{question}"})
+    return msgs
+
+
 def answer(question, history=None, s=None, mode="hybrid"):
     """对话式问答：返回 {answer, refs, evidence_chars}。"""
     s = s or ingest.settings()
@@ -130,15 +189,7 @@ def answer(question, history=None, s=None, mode="hybrid"):
     if not refs:
         return {"answer": "资料中未找到相关内容。可以换个说法，或先确认该文件是否已入库。",
                 "refs": [], "evidence_chars": 0}
-    msgs = [{"role": "system", "content": SYS_CHAT}]
-    # 只保留最近 6 条历史，避免上下文膨胀
-    for h in (history or [])[-6:]:
-        role = h.get("role")
-        content = (h.get("content") or "").strip()
-        if role in ("user", "assistant") and content:
-            msgs.append({"role": role, "content": content[:1500]})
-    msgs.append({"role": "user",
-                 "content": f"【资料】\n{ctx}\n\n【问题】\n{q}"})
+    msgs = _build_msgs(q, ctx, history)
     txt = _chat(db.require_endpoint(s, "vllm_url"), s.get("vllm_model") or "local", msgs,
                 timeout=int(s.get("assistant_timeout", 300)),
                 max_tokens=int(s.get("assistant_max_tokens", 2600)))

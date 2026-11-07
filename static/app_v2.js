@@ -605,12 +605,84 @@ function chatModeUI() {
   $("#btn-chat").textContent = draft ? "起草" : "提问";
 }
 
+async function chatStream(txt, out) {
+  // 流式问答：先出引用清单（约 2–3 秒），再逐字出正文。
+  // 用 fetch + ReadableStream 而不是 EventSource：EventSource 只能 GET 且不能带长参数。
+  const card = el("div", "result");
+  const head = el("div", "h");
+  head.append(el("span", "title", "回答"));
+  const badge = el("span", "badge", "检索中…");
+  head.append(badge);
+  card.append(head);
+  const body = el("div");
+  body.style.whiteSpace = "pre-wrap";
+  body.style.lineHeight = "1.75";
+  body.textContent = "";
+  card.append(body);
+  const refWrap = el("div", "meta");
+  refWrap.style.marginTop = "10px";
+  card.append(refWrap);
+  out.prepend(card);
+
+  const hist = encodeURIComponent(JSON.stringify(CHAT_HIST.slice(-6)));
+  const resp = await fetch(`/api/chat/stream?q=${encodeURIComponent(txt)}&history=${hist}`);
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "", answer = "", ev = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      ev = "";
+      let data = "";
+      block.split("\n").forEach(line => {
+        if (line.startsWith("event: ")) ev = line.slice(7).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      });
+      if (!data) continue;
+      let d = {};
+      try { d = JSON.parse(data); } catch (_) { continue; }
+      if (ev === "meta") {
+        badge.textContent = `证据 ${fmtN(d.evidence_chars || 0)} 字 · 引用 ${(d.refs || []).length}`;
+        (d.refs || []).forEach(r => {
+          const chip = el("span", "eg-chip", `[${r.n}] ${r.name}`);
+          chip.title = r.path || "";
+          chip.onclick = () => showFile(+r.file_id);
+          refWrap.append(chip);
+        });
+      } else if (ev === "token") {
+        answer += (d.t || "");
+        body.textContent = answer;           // 逐字刷新；纯文本不重建 DOM
+      } else if (ev === "error") {
+        body.textContent = answer + `\n\n[生成中断] ${d.error || ""}`;
+      } else if (ev === "done") {
+        CHAT_HIST.push({ role: "user", content: txt },
+                       { role: "assistant", content: answer.slice(0, 1200) });
+        $("#chat-input").value = "";
+        return;
+      }
+    }
+  }
+}
+
 async function doChat() {
   const mode = $("#chat-mode").value;
   const txt = ($("#chat-input").value || "").trim();
   if (!txt) return;
   const out = $("#chat-out"), btn = $("#btn-chat");
   btn.disabled = true;
+  if (mode !== "draft") {                 // 问答走 SSE 流式
+    try { await chatStream(txt, out); }
+    catch (e) { out.prepend(el("p", "badge bad", "失败：" + e.message)); }
+    finally { btn.disabled = false; }
+    return;
+  }
   const tip = el("p", "muted", mode === "draft"
     ? "正在检索资料并起草（约 30–90 秒，本地模型独占生成）…"
     : "正在检索并作答（约 10–30 秒）…");

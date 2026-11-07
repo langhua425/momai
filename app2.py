@@ -9,7 +9,7 @@ import threading
 import traceback
 from datetime import datetime
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 import db
 import ingest
@@ -799,6 +799,55 @@ def api_search():
 def api_draft_kinds():
     """文体清单，前端下拉用。"""
     return ok(kinds=[{"key": k, "name": v[0]} for k, v in assistant.KINDS.items()])
+
+
+@app.get("/api/chat/stream")
+def api_chat_stream():
+    """SSE 流式问答：先推 meta（引用清单），再逐片推 token，最后 done。
+
+    为什么用 GET + fetch 流而不是 EventSource：EventSource 不能发 POST、不能带 body，
+    历史消息塞进 query 会超长。前端用 fetch + ReadableStream 读同样的事件流。
+    """
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return fail("问题为空")
+    try:
+        history = json.loads(request.args.get("history") or "[]")
+    except Exception:                                          # noqa: BLE001
+        history = []
+    if not isinstance(history, list):
+        history = []
+
+    s = ingest.settings()
+    import assistant as A
+    try:
+        ctx, refs = A._collect(q, s)
+    except Exception as e:                                     # noqa: BLE001
+        return fail(f"检索失败: {type(e).__name__}: {e}", 500)
+
+    def gen():
+        meta = {"refs": refs, "evidence_chars": len(ctx), "q": q}
+        yield "event: meta\ndata: " + json.dumps(meta, ensure_ascii=False) + "\n\n"
+        if not refs:
+            payload = {"t": "资料中未找到相关内容。可以换个说法，或先确认该文件是否已入库。"}
+            yield "event: token\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+            yield "event: done\ndata: {}\n\n"
+            return
+        try:
+            msgs = A._build_msgs(q, ctx, history)
+            for piece in A._chat_stream(
+                    db.require_endpoint(s, "vllm_url"), s.get("vllm_model") or "local",
+                    msgs, timeout=int(s.get("assistant_timeout", 300)),
+                    max_tokens=int(s.get("assistant_max_tokens", 2600))):
+                yield "event: token\ndata: " + json.dumps({"t": piece}, ensure_ascii=False) + "\n\n"
+        except Exception as e:                                 # noqa: BLE001
+            err = {"error": f"{type(e).__name__}: {e}"[:300]}
+            yield "event: error\ndata: " + json.dumps(err, ensure_ascii=False) + "\n\n"
+        yield "event: done\ndata: {}\n\n"
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             "Connection": "keep-alive"})
 
 
 @app.post("/api/chat")
