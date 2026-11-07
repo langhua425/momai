@@ -71,6 +71,13 @@ def compose(rep):
                 lines.append(f"       {s}")
         lines.append("")
 
+    decisions = [g for g in rep.get("groups", []) if g.get("reason_kind") == "decision"]
+    if decisions:
+        total_d = sum(g["count"] for g in decisions)
+        kinds = "、".join(f"{g['reason_code']} {g['count']}" for g in decisions)
+        lines.append(f"④ 按决策跳过 {total_d} 个（不算缺口）：{kinds}")
+        lines.append("")
+
     ok_n = by_code.get("indexed_ok", 0)
     dup_n = by_code.get("duplicate_content", 0)
     junk_n = by_code.get("junk_ext", 0)
