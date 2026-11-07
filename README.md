@@ -84,8 +84,17 @@ venv/bin/python ingest.py index
 /opt/momai/venv/bin/python app.py          # 默认 8800
 ```
 
-配置项都在 `settings` 表（网页「设置」页可改）：嵌入端点与维度、OCR 档位、重排地址、
-Qdrant 连接、生成模型与超时、`file_index_policies` 的策略开关。
+### 配置：地址一律不在代码里
+
+服务端点（嵌入 / OCR / 生成 / 重排 / Qdrant）**代码中没有任何默认地址**，按以下优先级解析：
+
+| 优先级 | 来源 | 用途 |
+| --- | --- | --- |
+| 1 | 环境变量 `MOMAI_EMBED_URL` / `MOMAI_MINERU_URL` / `MOMAI_VLLM_URL` / `MOMAI_RERANK_URL` / `MOMAI_QDRANT_URL` | 容器/多机部署，见 [`.env.example`](.env.example) |
+| 2 | 数据库 `settings` 表（网页「设置」页） | 单机部署最方便的入口 |
+| 3 | 都没有 | 后端抛可读错误：`未配置 embed_url：请到「设置」页填写，或设置环境变量 MOMAI_EMBED_URL` |
+
+其余业务参数（嵌入维度、切块大小、OCR 档位、重排候选数、生成超时、策略开关）都在 `settings` 表里。
 
 ## 目录
 

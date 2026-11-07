@@ -188,7 +188,7 @@ def summarize_pending(limit=6, s=None, idle_only=True, file_id=None):
     """给还没摘要的章节补摘要（走 8001，遵守空闲门禁）。"""
     _ensure_table()
     s = s or ingest.settings()
-    base = (s.get("vllm_url") or "").rstrip("/")
+    base = db.require_endpoint(s, "vllm_url")
     model = s.get("vllm_model") or "local"
     hour = datetime.now().hour
     idle_check = False if (idle_only and 1 <= hour < 7) else idle_only

@@ -288,7 +288,7 @@ def _save_scan_stats(seen, indexable, added):
 
 def embed_texts(texts, s):
     import urllib.request
-    url, model = s["embed_url"], s["embed_model"]
+    url, model = db.require_endpoint(s, "embed_url"), s["embed_model"]
     dim_expect = int(s["embed_dim"])
     batch = max(1, int(s["embed_batch"]))
     out = []

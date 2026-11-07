@@ -127,7 +127,7 @@ def _parse_json(txt):
 
 
 def extract_for_file(fid, s, max_chunks=6):
-    base = (s.get("vllm_url") or "").rstrip("/")
+    base = db.require_endpoint(s, "vllm_url")
     model = s.get("vllm_model") or "local"
     if not base:
         raise RuntimeError("未配置 vllm_url")
@@ -181,7 +181,7 @@ def run(limit=5, s=None, idle_only=True):
     import ingest
     import time
     s = s or ingest.settings()
-    base = (s.get("vllm_url") or "").rstrip("/")
+    base = db.require_endpoint(s, "vllm_url")
     # 夜间窗口（01:00-07:00）不判空闲：白天让路，夜里补进度
     hour = datetime.now().hour
     in_night = 1 <= hour < 7

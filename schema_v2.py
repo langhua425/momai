@@ -176,14 +176,14 @@ DEFAULT_SETTINGS_V2 = {
     "site_title": "墨脉",
     "workspace": "/tank/files/wenmai",
     # 模型接入点
-    "embed_url": "http://127.0.0.1:8002/v1/embeddings",
+    "embed_url": "",
     "embed_model": "local",
     "embed_dim": 1024,                 # bge-m3；改维度必须重建索引
     "embed_batch": 8,
-    "mineru_url": "http://127.0.0.1:8004",
+    "mineru_url": "",
     "mineru_enabled": True,            # 扫描件/图片走 mineru OCR
     "mineru_poll_sec": 5,
-    "vllm_url": "http://127.0.0.1:8001/v1",
+    "vllm_url": "",
     "vllm_model": "local",
     "vllm_enabled": False,             # 需要时用 vllm 做实体抽取/摘要
     # 切块
@@ -224,7 +224,7 @@ DEFAULT_SETTINGS_V2 = {
     "missing_detect_enabled": True,
     # Qdrant 双写（PG 仍是主库，Qdrant 只做副本/加速）
     "qdrant_enabled": True,
-    "qdrant_url": "http://127.0.0.1:6333",
+    "qdrant_url": "",
     "qdrant_collection": "wenmai_chunks",
     "qdrant_recall_enabled": True,      # Qdrant 作为语义第二路参与 RRF（同源向量，权重下调）
     "qdrant_recall_weight": 0.6,
@@ -232,7 +232,7 @@ DEFAULT_SETTINGS_V2 = {
     "entity_extract_enabled": False,
     "entity_extract_limit": 3,
     # 重排（rerank）
-    "rerank_url": "http://127.0.0.1:8003",
+    "rerank_url": "",
     "rerank_model": "reranker",
     "rerank_enabled": True,
     "rerank_candidates": 30,           # 融合后送进重排的候选条数

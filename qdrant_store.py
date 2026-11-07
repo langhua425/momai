@@ -1,3 +1,4 @@
+import db
 """Qdrant 双写：与 pgvector 并行保存同一批向量。
 
 设计原则
@@ -14,7 +15,7 @@ DIM = 1024
 
 
 def _base(s):
-    return (s.get("qdrant_url") or "").rstrip("/")
+    return db.resolve_endpoint(s, "qdrant_url")
 
 
 def enabled(s):

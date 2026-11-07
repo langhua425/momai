@@ -79,7 +79,7 @@ def summarize_file(fid, s):
     name, ver, text = _text_of(fid)
     if not text or len(text.strip()) < 80:
         return None
-    base = (s.get("vllm_url") or "").rstrip("/")
+    base = db.require_endpoint(s, "vllm_url")
     model = s.get("vllm_model") or "local"
     raw = _chat(base, model, PROMPT.replace("__TEXT__", f"《{name}》\n{text}"), timeout=240)
     data = _parse_json(raw)
@@ -104,7 +104,7 @@ def summarize_file(fid, s):
 def run(limit=3, s=None, idle_only=True):
     _ensure_table()
     s = s or ingest.settings()
-    base = (s.get("vllm_url") or "").rstrip("/")
+    base = db.require_endpoint(s, "vllm_url")
     hour = datetime.now().hour
     in_night = 1 <= hour < 7
     if idle_only and in_night:

@@ -88,10 +88,44 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vec ON chunks USING hnsw (embedding vector
 CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING gin (body gin_trgm_ops);
 """
 
+# ---------------------------------------------------------------------------
+# 服务端点解析：代码里不写死任何地址
+#
+# 优先级：环境变量 > 设置页(settings 表) > 空。
+# 空值时调用方必须抛出可读错误（require_endpoint），而不是默默连 127.0.0.1 失败。
+# 这样换机器、换端口、把嵌入服务搬到另一台机器，只需改配置，不需要改代码。
+# ---------------------------------------------------------------------------
+ENV_KEYS = {
+    "embed_url": "MOMAI_EMBED_URL",
+    "mineru_url": "MOMAI_MINERU_URL",
+    "vllm_url": "MOMAI_VLLM_URL",
+    "rerank_url": "MOMAI_RERANK_URL",
+    "qdrant_url": "MOMAI_QDRANT_URL",
+}
+
+
+def resolve_endpoint(s, key):
+    """返回实际使用的端点；未配置时返回空串。"""
+    env = os.environ.get(ENV_KEYS.get(key, ""), "")
+    if env.strip():
+        return env.strip().rstrip("/")
+    return (s or {}).get(key, "").strip().rstrip("/") if isinstance(s or {}, dict) else ""
+
+
+def require_endpoint(s, key):
+    """未配置就抛可读错误，避免用错误地址去连。"""
+    v = resolve_endpoint(s, key)
+    if not v:
+        env = ENV_KEYS.get(key, key)
+        raise RuntimeError(
+            f"未配置 {key}：请到「设置」页填写，或设置环境变量 {env}")
+    return v
+
+
 DEFAULT_SETTINGS = {
-    "site_title": "灵犀文脉",
+    "site_title": "墨脉",
     "vault_path": "/tank/files/wenmai/vault",
-    "embed_url": "http://127.0.0.1:8002/v1/embeddings",
+    "embed_url": "",   # 端点不写死：在「设置」页或环境变量里配
     "embed_model": "local",
     "embed_dim": 1024,
     "embed_batch": 8,

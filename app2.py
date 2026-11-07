@@ -244,7 +244,9 @@ def api_status():
                     for i, n, r, e, ex in srcs],
         "dims": [d[0] for d in dims],
         "task": TASK,
-        "endpoints": {"embedding": s["embed_url"], "mineru": s["mineru_url"], "vllm": s["vllm_url"]},
+        "endpoints": {"embedding": db.resolve_endpoint(s, "embed_url"),
+                       "mineru": db.resolve_endpoint(s, "mineru_url"),
+                       "vllm": db.resolve_endpoint(s, "vllm_url")},
     })
 
 
@@ -689,7 +691,7 @@ def api_probe():
     # vllm
     try:
         import urllib.request
-        with urllib.request.urlopen(s["vllm_url"].rstrip("/") + "/models", timeout=8) as r:
+        with urllib.request.urlopen(db.require_endpoint(s, "vllm_url") + "/models", timeout=8) as r:
             d = json.loads(r.read())
             out["vllm"] = {"ok": True, "models": [m.get("id") for m in d.get("data", [])][:8]}
     except Exception as e:

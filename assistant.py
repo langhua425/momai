@@ -139,7 +139,7 @@ def answer(question, history=None, s=None, mode="hybrid"):
             msgs.append({"role": role, "content": content[:1500]})
     msgs.append({"role": "user",
                  "content": f"【资料】\n{ctx}\n\n【问题】\n{q}"})
-    txt = _chat(s.get("vllm_url"), s.get("vllm_model") or "local", msgs,
+    txt = _chat(db.require_endpoint(s, "vllm_url"), s.get("vllm_model") or "local", msgs,
                 timeout=int(s.get("assistant_timeout", 300)),
                 max_tokens=int(s.get("assistant_max_tokens", 2600)))
     return {"answer": txt or "模型未返回内容，请重试。", "refs": refs,
@@ -169,7 +169,7 @@ def draft(topic, kind="report", points="", s=None, mode="hybrid"):
     )
     msgs = [{"role": "system", "content": SYS_DRAFT},
             {"role": "user", "content": user}]
-    txt = _chat(s.get("vllm_url"), s.get("vllm_model") or "local", msgs,
+    txt = _chat(db.require_endpoint(s, "vllm_url"), s.get("vllm_model") or "local", msgs,
                 timeout=int(s.get("draft_timeout", 420)),
                 max_tokens=int(s.get("draft_max_tokens", 3200)))
     return {"draft": txt or "模型未返回内容，请重试。", "refs": refs, "kind": kind,
