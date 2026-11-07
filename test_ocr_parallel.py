@@ -4,7 +4,7 @@ import sys, time, threading
 sys.path.insert(0, "/opt/wenmai")
 import db, mineru
 
-s = {"mineru_url": "http://10.10.10.1:8004"}
+s = {"mineru_url": "http://127.0.0.1:8004"}
 
 with db.cursor(commit=False) as con:
     rows = con.run("""SELECT id, real_path, name, size FROM files

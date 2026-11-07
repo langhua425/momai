@@ -91,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING gin (body gin_trgm_ops)
 DEFAULT_SETTINGS = {
     "site_title": "灵犀文脉",
     "vault_path": "/tank/files/wenmai/vault",
-    "embed_url": "http://10.10.10.1:8002/v1/embeddings",
+    "embed_url": "http://127.0.0.1:8002/v1/embeddings",
     "embed_model": "local",
     "embed_dim": 1024,
     "embed_batch": 8,

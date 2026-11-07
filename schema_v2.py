@@ -176,14 +176,14 @@ DEFAULT_SETTINGS_V2 = {
     "site_title": "墨脉",
     "workspace": "/tank/files/wenmai",
     # 模型接入点
-    "embed_url": "http://10.10.10.1:8002/v1/embeddings",
+    "embed_url": "http://127.0.0.1:8002/v1/embeddings",
     "embed_model": "local",
     "embed_dim": 1024,                 # bge-m3；改维度必须重建索引
     "embed_batch": 8,
-    "mineru_url": "http://10.10.10.1:8004",
+    "mineru_url": "http://127.0.0.1:8004",
     "mineru_enabled": True,            # 扫描件/图片走 mineru OCR
     "mineru_poll_sec": 5,
-    "vllm_url": "http://10.10.10.1:8001/v1",
+    "vllm_url": "http://127.0.0.1:8001/v1",
     "vllm_model": "local",
     "vllm_enabled": False,             # 需要时用 vllm 做实体抽取/摘要
     # 切块
@@ -232,7 +232,7 @@ DEFAULT_SETTINGS_V2 = {
     "entity_extract_enabled": False,
     "entity_extract_limit": 3,
     # 重排（rerank）
-    "rerank_url": "http://10.10.10.1:8003",
+    "rerank_url": "http://127.0.0.1:8003",
     "rerank_model": "reranker",
     "rerank_enabled": True,
     "rerank_candidates": 30,           # 融合后送进重排的候选条数
