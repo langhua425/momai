@@ -70,6 +70,7 @@
 | 4.1 | 三张表：memory_items（双时态 + authority + scope_key）/ memory_revisions / memory_evidence | ✅ **两条时间轴必须分开**：`valid_from/valid_to` 是事实在现实成立的时间，`created_at/updated_at` 是记录进系统的时间。归档晚于生效的公文极常见；只用 valid_* 会误判「当时系统里没有」，只用 created_* 会误判「2024 年就生效」 |
 | 4.2 | 写入管道：用户显式「记住」+ 冲突对账 | ✅ **冲突不覆盖，先废止**：旧条 `superseded` + `valid_to` 封口、旧值进 `memory_revisions`，新条另起。覆盖式更新会直接毁掉「去年这条规定是什么」的能力 |
 | 4.2b | **权威性只降不升** | ✅ 机器摘要（summary）不许顶掉正式文件（official）的同一 key，只能反向被覆盖。否则一次 LLM 幻觉就污染权威事实。实测低权威写入返回 `rejected` |
+| 4.2c | **记忆自动派生：摘要 → 候选事实** | ✅ `derive.py`：整篇摘要喂本地模型，要 JSON `{key,content,kind,valid_from}`；`authority='summary'`、按文件版本幂等、03:30 每晚 40 份。40 份实测 created 145 / fail 0，但**抽样查出 22% 入库垃圾**，四道闸门补齐后清掉 37 条：① HTML 帧页（left/main/nav…）不是文档 → 来源黑名单；② `plot.log` 抽的是「谁何时打了多大纸」→ `.log` 跳过；③ `content` 只剩数值（`2019年9月3日`）→ 用 key 补成完整句，补不出才丢；④ 同文件内短句被长句包含 → 去重。现存 146 条（fact 57 / quantity 36 / date 19 / org 16 / standard 11 / money 9）。**教训：抽取类任务「全 success」的绿灯掩盖不了入库垃圾，第一版必须人工抽样。** |
 | 4.3 | 第四路召回参与加权 RRF | ✅ 记忆本体走 `memories` 字段（事实），证据块进 RRF（文档块）。**权重必须 >1（默认 1.6）**：记忆路通常只出 1–3 条，`0.5/(60+1)` 会被 50 条向量候选里最差的一条压死 |
 | 4.3b | 记忆证据可见性 | ✅ 重排只判字面相关性、文档聚合只留同文件最高分块 —— 两者叠加会埋掉记忆证据。故记忆命中的文件强制前置补位并标 `source=memory` |
 | 4.4 | as_of 时间点检索 | ✅ `valid_from <= as_of AND (valid_to IS NULL OR valid_to > as_of)`，**且不过滤 status**：历史版本在那个窗口内就是当时的事实。实测 2019 查到 IV 类（superseded）、2025 查到 III 类（active） |
