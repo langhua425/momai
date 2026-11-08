@@ -994,6 +994,15 @@ def api_search_legacy():
     return ok(results=results[:limit], mode=mode, count=len(results))
 
 
+@app.get("/api/brief")
+def api_brief():
+    import brief as B
+    r = B.latest()
+    if not r:
+        return ok(brief=None)
+    return ok(brief=r)
+
+
 @app.get("/api/recommendations")
 def api_recommendations():
     import recommend as R

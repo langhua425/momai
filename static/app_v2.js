@@ -20,7 +20,7 @@ document.querySelectorAll("#nav button").forEach(b => {
     $("#tab-" + b.dataset.tab).classList.add("active");
     if (b.dataset.tab === "files") loadFiles();
     if (b.dataset.tab === "settings") loadSettings();
-    if (b.dataset.tab === "overview") loadStatus();
+    if (b.dataset.tab === "overview") { loadStatus(); loadBrief(); }
     if (b.dataset.tab === "graph") loadEntities();
     if (b.dataset.tab === "chat") initChat();
     if (b.dataset.tab === "exclude") loadExclude();
@@ -68,6 +68,28 @@ $("#btn-count").onclick = async () => {
 };
 
 /* ---------- 概览 ---------- */
+// 简报渲染：只需要 # / ## / - **，不引 markdown 库（几十行换来一个依赖不值得）
+function briefHtml(md) {
+  return md.split("\n").map(line => {
+    const esc = line.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const bold = esc.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+                    .replace(/`(.+?)`/g, "<code>$1</code>");
+    if (esc.startsWith("# ")) return `<h3 style="margin:6px 0 10px">${bold.slice(2)}</h3>`;
+    if (esc.startsWith("## ")) return `<h4 style="margin:14px 0 6px">${bold.slice(3)}</h4>`;
+    if (esc.startsWith("  - ")) return `<div class="brief-li sub">${bold.slice(4)}</div>`;
+    if (esc.startsWith("- ")) return `<div class="brief-li">${bold.slice(2)}</div>`;
+    return esc.trim() ? `<div>${bold}</div>` : "";
+  }).join("");
+}
+
+async function loadBrief() {
+  const { brief } = await api("/api/brief");
+  if (!brief) return;                       // 还没生成过：整块隐藏，不占位
+  $("#brief-panel").style.display = "";
+  $("#brief-date").textContent = brief.date + " · 生成于 " + (brief.created_at || "").slice(11, 16);
+  $("#brief-box").innerHTML = briefHtml(brief.content_md || "");
+}
+
 async function loadStatus() {
   loadProgress().catch(() => {});
   const { status: s } = await api("/api/status");
@@ -868,3 +890,5 @@ async function loadIgnored() {
 
 $("#btn-ex-add").onclick = addExcludeRule;
 $("#ex-value").addEventListener("keydown", e => { if (e.key === "Enter") addExcludeRule(); });
+
+loadBrief();   // 默认停在概览页，首屏即显示简报

@@ -202,3 +202,15 @@ td.empty { text-align: center; color: #8a8a8a; padding: 18px 0; }
 /* 推荐卡片：13 张同质卡片连排时，纯白底无边线会糊成一片 */
 #reco-out .result { border: 1px solid var(--line); margin-bottom: 10px; padding: 14px 16px 16px; }
 #reco-out { padding-bottom: 24px; }
+
+/* 工作简报：用左侧竖线做条目符号，比 • 更像文档目录 */
+.brief { font-size: 13.5px; line-height: 1.75; overflow-wrap: anywhere; }
+.brief-li.sub { padding-left: 30px; }
+.brief-li.sub::before { left: 16px; background: #c9c9d4; }
+.brief-li { padding-left: 14px; position: relative; }
+.brief-li::before { content: ""; position: absolute; left: 4px; top: 9px;
+  width: 4px; height: 4px; border-radius: 50%; background: var(--p2); }
+.brief code { background: #f4f4f8; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+/* 简报卡片可能很长，滚动到底部时别贴住固定状态栏 */
+#brief-panel { margin-bottom: 14px; }
