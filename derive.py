@@ -133,10 +133,17 @@ def derive_one(file_id, name, summary, version, s):
         return [], "模型未返回可解析的 JSON（两次预算均失败）"
 
     made = []
+    kept = []                       # 同一份文件内去重：短句被长句包含就丢短的
     for f in data["facts"][:4]:
         content = _clean_fact(f)
         if not content:
             continue
+        flat = re.sub(r"[\s，。、；：“”‘’（）()《》]", "", content)
+        if any(flat in re.sub(r"[\s，。、；：“”‘’（）()《》]", "", k) or
+               re.sub(r"[\s，。、；：“”‘’（）()《》]", "", k) in flat for k in kept):
+            continue
+        kept.append(content)
+        f["content"] = content
         kind = f.get("kind") if f.get("kind") in KINDS_OK else "fact"
         try:
             r = M.remember(content, key=(f.get("key") or "").strip() or None,
