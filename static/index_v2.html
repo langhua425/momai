@@ -80,6 +80,34 @@
 
   <section id="tab-graph" class="tab">
     <div class="panel">
+      <h2>图与视图 <span id="graph-info" class="muted" style="font-weight:400;font-size:12px"></span></h2>
+      <div class="toolbar">
+        <select id="graph-sel" title="选择图"></select>
+        <button id="btn-graph-del" title="删除当前图" style="display:none">删除图</button>
+        <select id="f-type">
+          <option value="">全部实体类型</option>
+          <option value="org">机构</option>
+          <option value="project">项目</option>
+          <option value="money">金额</option>
+          <option value="doc">文件</option>
+          <option value="concept">概念</option>
+        </select>
+        <input id="f-min" type="number" min="1" placeholder="最低提及" style="width:96px">
+        <button id="btn-subview-save">存为视图</button>
+        <span id="graph-msg" class="muted"></span>
+      </div>
+      <div class="toolbar" id="subview-bar"></div>
+      <details style="margin-bottom:10px">
+        <summary class="muted" style="cursor:pointer">新建图（按范围）</summary>
+        <div class="toolbar" style="margin-top:8px">
+          <input id="graph-name" placeholder="图名，如：2023 往来文件">
+          <input id="graph-prefix" placeholder="路径前缀，如：往来文件/2023（可不填）">
+          <input id="graph-date-from" type="date" title="文件时间下界">
+          <button class="primary" id="btn-graph-build">建图</button>
+        </div>
+      </details>
+    </div>
+    <div class="panel">
       <h2>实体图谱 <span id="graph-count" class="muted" style="font-weight:400;font-size:12px"></span></h2>
       <div class="toolbar">
         <input id="ent-q" placeholder="搜索实体：生态城财政局 / 中审华 / 绿化养管…">

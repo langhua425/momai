@@ -142,6 +142,62 @@ def api_summary_make():
 
 
 # ---------- 实体图谱 + 相关文档 ----------
+# ---------- 多图多视图（T5.1）----------
+@app.get("/api/graphs")
+def api_graphs():
+    import graphs as G
+    return ok(items=G.list_graphs())
+
+
+@app.post("/api/graphs")
+def api_graph_create():
+    import graphs as G
+    d = request.get_json(silent=True) or {}
+    name = (d.get("name") or "").strip()
+    if not name:
+        return fail("需要图名")
+    try:
+        return ok(graph=G.build(name, d.get("scope") or {}, d.get("note")))
+    except Exception as e:                                     # noqa: BLE001
+        return fail(f"建图失败: {e}", 500)
+
+
+@app.get("/api/graphs/<int:gid>")
+def api_graph_get(gid):
+    import graphs as G
+    r = G.get(gid, (request.args.get("subview") or "").strip() or None)
+    if r is None:
+        return fail("图不存在", 404)
+    if r.get("error"):
+        return fail(r["error"], 404)
+    return ok(**r)
+
+
+@app.delete("/api/graphs/<int:gid>")
+def api_graph_delete(gid):
+    import graphs as G
+    with db.cursor() as con:
+        con.run("DELETE FROM graphs WHERE id=:i AND name <> '全库'", i=gid)   # 默认图不许删
+    return ok(deleted=gid)
+
+
+@app.post("/api/graphs/<int:gid>/subviews")
+def api_graph_subview_add(gid):
+    import graphs as G
+    d = request.get_json(silent=True) or {}
+    name = (d.get("name") or "").strip()
+    if not name:
+        return fail("需要视图名")
+    return ok(subview=G.add_subview(gid, name, d.get("filters") or {}))
+
+
+@app.delete("/api/graphs/<int:gid>/subviews/<name>")
+def api_graph_subview_del(gid, name):
+    import graphs as G
+    G.del_subview(gid, name)
+    return ok(deleted=name)
+
+
 @app.get("/api/entities")
 def api_entities():
     q = (request.args.get("q") or "").strip()

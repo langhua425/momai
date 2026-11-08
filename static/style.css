@@ -214,3 +214,9 @@ td.empty { text-align: center; color: #8a8a8a; padding: 18px 0; }
 
 /* 简报卡片可能很长，滚动到底部时别贴住固定状态栏 */
 #brief-panel { margin-bottom: 14px; }
+
+/* 图谱面板：工具栏会换行，视图条要跟工具栏视觉上连成一块 */
+#tab-graph .toolbar { flex-wrap: wrap; row-gap: 8px; }
+#subview-bar { margin-top: -4px; align-items: center; }
+#subview-bar::before { content: "视图"; color: var(--muted); font-size: 12px; margin-right: 2px; }
+#tab-graph details summary { padding: 4px 0; }

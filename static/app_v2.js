@@ -5,6 +5,8 @@ const fmtN = (n) => n === null || n === undefined ? "-" : Number(n).toLocaleStri
 const fmtSize = (n) => { n = Number(n || 0); const u = ["B", "KB", "MB", "GB"]; let i = 0; while (n >= 1024 && i < 3) { n /= 1024; i++; } return n.toFixed(i ? 1 : 0) + u[i]; };
 
 async function api(path, opt = {}) {
+  // body 传对象就自动序列化：直接 spread 进 fetch 会把对象变成 "[object Object]"
+  if (opt.body && typeof opt.body !== "string") opt = { ...opt, body: JSON.stringify(opt.body) };
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opt });
   const j = await r.json().catch(() => ({ ok: false, error: "响应非 JSON" }));
   if (!j.ok) throw new Error(j.error || ("HTTP " + r.status));
@@ -21,7 +23,7 @@ document.querySelectorAll("#nav button").forEach(b => {
     if (b.dataset.tab === "files") loadFiles();
     if (b.dataset.tab === "settings") loadSettings();
     if (b.dataset.tab === "overview") { loadStatus(); loadBrief(); }
-    if (b.dataset.tab === "graph") loadEntities();
+    if (b.dataset.tab === "graph") loadGraphs();
     if (b.dataset.tab === "chat") initChat();
     if (b.dataset.tab === "exclude") loadExclude();
     if (b.dataset.tab === "reco") loadReco();
@@ -227,6 +229,116 @@ $("#q").onkeydown = e => { if (e.key === "Enter") doSearch(); };
 const TYPE_CLS = { org: "t-org", project: "t-project", money: "t-money", doc: "t-doc" };
 const TYPE_CN = { org: "机构", project: "项目", money: "金额", doc: "文件", concept: "概念" };
 
+/* ---------- 多图多视图（T5.1）---------- */
+let CUR_GRAPH = null;      // 当前图 id
+let CUR_SUBVIEW = null;    // 当前视图名（null = 不过滤）
+
+async function loadGraphs() {
+  const { items } = await api("/api/graphs");
+  const sel = $("#graph-sel");
+  sel.innerHTML = items.map(g =>
+    `<option value="${g.id}">${esc(g.name)}${g.subviews ? ` · ${g.subviews} 视图` : ""}</option>`).join("");
+  if (!items.length) return;
+  const keep = CUR_GRAPH ?? items[0].id;
+  sel.value = String(keep);
+  sel.onchange = () => { CUR_GRAPH = +sel.value; CUR_SUBVIEW = null; loadGraphView(); };
+  CUR_GRAPH = +sel.value;
+  loadGraphView();
+}
+
+async function loadGraphView() {
+  if (!CUR_GRAPH) return;
+  const box = $("#ent-list");
+  box.innerHTML = `<li class="muted">加载中…</li>`;
+  const qs = CUR_SUBVIEW ? `?subview=${encodeURIComponent(CUR_SUBVIEW)}` : "";
+  try {
+    const r = await api(`/api/graphs/${CUR_GRAPH}${qs}`);
+    const sc = r.graph.scope || {};
+    const scoped = Object.keys(sc).length
+      ? "范围 " + Object.entries(sc).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join("/") : v}`).join(" · ")
+      : "不设范围（全库）";
+    $("#graph-info").textContent = `${scoped} · 节点 ${r.nodes.length} · 边 ${r.edges.length}`;
+    // 删除按钮跟着当前图走：默认图「全库」不允许删
+    const del = $("#btn-graph-del");
+    if (del) {
+      del.style.display = r.graph.name === "全库" ? "none" : "";
+      del.onclick = async () => {
+        if (!confirm(`删除图「${r.graph.name}」？（实体和关系不动，只删这个范围）`)) return;
+        await api(`/api/graphs/${r.graph.id}`, { method: "DELETE" });
+        CUR_GRAPH = null; loadGraphs();
+      };
+    }
+    renderSubviewBar(r.subviews || []);
+    box.innerHTML = "";
+    if (!r.nodes.length) { box.innerHTML = `<li class="muted">这个范围里没有实体</li>`; return; }
+    r.nodes.forEach(e => {
+      const li = el("li");
+      li.innerHTML = `<div class="t">${esc(e.name)}</div>` +
+        `<div class="m"><span class="eg-type ${TYPE_CLS[e.type] || ""}">${TYPE_CN[e.type] || e.type}</span>` +
+        `提及 ${e.mentions} · 文件 ${e.files}</div>`;
+      li.onclick = () => showEntity(e.id, li);
+      box.append(li);
+    });
+  } catch (e) { box.innerHTML = `<li class="badge bad">${esc(e.message)}</li>`; }
+}
+
+function renderSubviewBar(subviews) {
+  const bar = $("#subview-bar");
+  bar.innerHTML = "";
+  const mk = (label, name, active) => {
+    const b = el("button", active ? "primary" : "", label);
+    b.onclick = () => { CUR_SUBVIEW = name; loadGraphView(); };
+    return b;
+  };
+  bar.append(mk("全部", null, !CUR_SUBVIEW));
+  subviews.forEach(v => {
+    const b = mk(v.name, v.name, CUR_SUBVIEW === v.name);
+    b.title = JSON.stringify(v.filters);
+    bar.append(b);
+    const del = el("button", "", "×");
+    del.title = "删除视图 " + v.name;
+    del.style.marginLeft = "-6px";
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      await api(`/api/graphs/${CUR_GRAPH}/subviews/${encodeURIComponent(v.name)}`, { method: "DELETE" });
+      if (CUR_SUBVIEW === v.name) CUR_SUBVIEW = null;
+      loadGraphView();
+    };
+    bar.append(del);
+  });
+}
+
+async function saveSubview() {
+  if (!CUR_GRAPH) return;
+  const filters = {};
+  const t = $("#f-type").value;
+  const m = parseInt($("#f-min").value, 10);
+  if (t) filters.entity_types = [t];
+  if (m > 0) filters.min_mentions = m;
+  if (!Object.keys(filters).length) { $("#graph-msg").textContent = "先选类型或填最低提及"; return; }
+  const name = [t ? (TYPE_CN[t] || t) : "", m ? `提及≥${m}` : ""].filter(Boolean).join(" · ");
+  await api(`/api/graphs/${CUR_GRAPH}/subviews`, { method: "POST", body: { name, filters } });
+  CUR_SUBVIEW = name;
+  $("#graph-msg").textContent = "";
+  loadGraphView();
+}
+
+async function buildGraph() {
+  const name = $("#graph-name").value.trim();
+  if (!name) { $("#graph-msg").textContent = "需要图名"; return; }
+  const scope = {};
+  const p = $("#graph-prefix").value.trim();
+  const d = $("#graph-date-from").value;
+  if (p) scope.path_prefix = p;
+  if (d) scope.date_from = d;
+  try {
+    const r = await api("/api/graphs", { method: "POST", body: { name, scope } });
+    $("#graph-msg").textContent = `已建：节点 ${r.graph.nodes} · 边 ${r.graph.edges}`;
+    CUR_GRAPH = r.graph.id;
+    loadGraphs();
+  } catch (e) { $("#graph-msg").textContent = e.message; }
+}
+
 async function loadEntities() {
   const q = ($("#ent-q") && $("#ent-q").value.trim()) || "";
   const box = $("#ent-list");
@@ -290,6 +402,8 @@ async function showEntity(id, li) {
 }
 
 $("#btn-ent-search").onclick = loadEntities;
+$("#btn-subview-save").onclick = saveSubview;
+$("#btn-graph-build").onclick = buildGraph;
 $("#ent-q").onkeydown = e => { if (e.key === "Enter") loadEntities(); };
 
 /* ---------- 文件 ---------- */
