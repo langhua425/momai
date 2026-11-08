@@ -116,6 +116,7 @@ input:focus, select:focus, textarea:focus {
 .badge.warn { color: #d48806; border-color: #ffe58f; background: #fffbe6; }
 .badge.bad { color: var(--bad); border-color: #ffa39e; background: #fff1f0; }
 .badge.claim { color: var(--p2); border-color: #d3adf7; background: #f9f0ff; }
+.badge.conf { color: #3f3f4d; border-color: #b9b9c6; background: #ececf2; font-weight: 500; }
 .badge.evidence { color: var(--p2); border-color: #e0d7fb; background: #f6f2ff; font-weight: 500; }
 .muted { color: var(--muted); }
 .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
@@ -197,3 +198,7 @@ td.empty { text-align: center; color: #8a8a8a; padding: 18px 0; }
 #chat-out { padding-bottom: 20px; }   /* body 已留 72px，这里只需微小间隙 */
 /* 正文行宽：中文长报文一行超过 60 字阅读会累 */
 #chat-out .result div[style*="pre-wrap"] { max-width: 78ch; }
+
+/* 推荐卡片：13 张同质卡片连排时，纯白底无边线会糊成一片 */
+#reco-out .result { border: 1px solid var(--line); margin-bottom: 10px; padding: 14px 16px 16px; }
+#reco-out { padding-bottom: 24px; }

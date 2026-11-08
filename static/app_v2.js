@@ -24,6 +24,7 @@ document.querySelectorAll("#nav button").forEach(b => {
     if (b.dataset.tab === "graph") loadEntities();
     if (b.dataset.tab === "chat") initChat();
     if (b.dataset.tab === "exclude") loadExclude();
+    if (b.dataset.tab === "reco") loadReco();
   };
 });
 
@@ -270,6 +271,46 @@ $("#btn-ent-search").onclick = loadEntities;
 $("#ent-q").onkeydown = e => { if (e.key === "Enter") loadEntities(); };
 
 /* ---------- 文件 ---------- */
+const RECO_LABEL = { doc_gap: "配套缺件", stale_value: "长期未看", new_related: "新入库相关" };
+
+async function loadReco() {
+  const kind = $("#reco-kind").value;
+  const out = $("#reco-out");
+  out.innerHTML = "";
+  const { items } = await api(`/api/recommendations?limit=50${kind ? "&kind=" + kind : ""}`);
+  $("#reco-count").textContent = `待处理 ${items.length} 条`;
+  if (!items.length) {
+    out.append(el("p", "muted", "暂无推荐。夜间 06:00 会重算；也可能说明该看的都看过了。"));
+    return;
+  }
+  items.forEach(it => {
+    const card = el("div", "result");
+    const head = el("div", "h");
+    head.append(el("span", "title", it.title));
+    const badge = el("span", "badge " + (it.kind === "doc_gap" ? "warn" : "claim"), RECO_LABEL[it.kind] || it.kind);
+    head.append(badge);
+    head.append(el("span", "badge conf", "置信 " + Number(it.confidence).toFixed(1)));
+    card.append(head);
+    card.append(el("p", "muted", it.reason));
+
+    const bar = el("div");
+    bar.style.display = "flex";
+    bar.style.gap = "8px";
+    bar.style.marginTop = "8px";
+    const open = el("button", "primary", "打开文件");
+    open.onclick = () => showFile(it.file_id);
+    const later = el("button", "", "稍后");
+    later.onclick = async () => {
+      await api(`/api/recommendations/${it.id}/dismiss`, { method: "POST" });
+      card.remove();
+      $("#reco-count").textContent = `待处理 ${$("#reco-out").querySelectorAll(".result").length} 条`;
+    };
+    bar.append(open, later);
+    card.append(bar);
+    out.append(card);
+  });
+}
+
 async function loadFiles() {
   const { files } = await api(`/api/files?status=${encodeURIComponent($("#file-status").value)}&q=${encodeURIComponent($("#file-q").value)}&limit=200`);
   const tb = $("#files-body"); tb.innerHTML = "";
@@ -285,6 +326,8 @@ async function loadFiles() {
   });
 }
 $("#btn-files").onclick = loadFiles;
+$("#btn-reco").onclick = loadReco;
+$("#reco-kind").onchange = loadReco;
 
 async function showFile(id) {
   document.querySelector('#nav button[data-tab="files"]').click();

@@ -29,6 +29,7 @@
     <button data-tab="search">检索</button>
     <button data-tab="chat">对话</button>
     <button data-tab="graph">图谱</button>
+    <button data-tab="reco">推荐</button>
     <button data-tab="files">文件</button>
     <button data-tab="exclude">排除</button>
     <button data-tab="settings">设置</button>
@@ -90,6 +91,21 @@
         </div>
       </div>
     </div>
+  </section>
+
+    <section id="tab-reco" class="tab">
+    <div class="toolbar">
+      <select id="reco-kind">
+        <option value="">全部类型</option>
+        <option value="doc_gap">配套缺件</option>
+        <option value="stale_value">长期未看</option>
+        <option value="new_related">新入库相关</option>
+      </select>
+      <button class="primary" id="btn-reco">刷新</button>
+      <span class="muted" id="reco-count"></span>
+    </div>
+    <p class="muted" style="margin-top:0">按规则生成，不是模型猜的：配套缺件看同目录公文成对关系，长期未看按实体提及数与浏览记录比对。</p>
+    <div id="reco-out"></div>
   </section>
 
   <section id="tab-search" class="tab">

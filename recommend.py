@@ -113,12 +113,12 @@ def generate(dry_run=False):
     for fid, name, path, shared in _rule_new_related():
         conf = min(0.9, 0.4 + 0.1 * shared)
         rows.append(("new_related", fid, f"新入库：{name}",
-                     f"新入库资料，与你最近查阅的内容共享 {shared} 个实体",
+                     f"共享 {shared} 个实体 · 近 14 天入库",
                      conf, {"shared_entities": shared, "dir": (path or "").rsplit("/", 1)[0]}))
 
     for fid, name, d, before, after in _rule_doc_gap():
         rows.append(("doc_gap", fid, f"可能缺配套文件：{name}",
-                     f"该目录有「{before}」类文件，但找不到「{after}」",
+                     f"缺：{after} · 同目录已有「{before}」",
                      0.5, {"dir": d, "before": before, "after": after}))
 
     # 冷启动保护：一条浏览记录都没有时，「从没看过」对所有文件都成立，
@@ -130,8 +130,8 @@ def generate(dry_run=False):
     if n_views == 0:
         stale = stale[:3]
     for fid, name, mentions, last_seen in stale:
-        why = (f"被 {mentions} 个实体提及；系统尚无浏览记录，按重要度列出"
-               if n_views == 0 else f"被 {mentions} 个实体提及，但 90 天内没有打开记录")
+        why = (f"提及 {mentions} 次 · 系统尚无浏览记录，按重要度列出"
+               if n_views == 0 else f"提及 {mentions} 次 · 90 天未打开")
         rows.append(("stale_value", fid, f"很久没看了：{name}", why,
                      0.3 if n_views == 0 else 0.4, {"mentions": int(mentions),
                                                     "cold_start": n_views == 0}))
