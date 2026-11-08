@@ -44,6 +44,51 @@ PROMPT = """从下面这份文件的摘要中，抽取可以脱离本文件独�
 """
 
 
+# 来源黑名单：HTML 导航碎片（left.htm / top.htm / main.htm …）不是文档，
+# 抽出来的是「存在某某公报」「设有分类索引」这类元描述，纯垃圾。
+JUNK_NAME = re.compile(r"^(left|right|top|bottom|main|nav|menu|index|frame|head|foot)[\w-]*\.html?$",
+                       re.I)
+
+# 打印/绘图日志（plot.log 之类）记录的是「谁在什么时候打了图、用了多大纸」，
+# 是过程元数据，不是业务事实 —— 抽出来只会污染记忆库。
+JUNK_EXT = {".log"}
+
+# 元描述禁用词：说的还是「这份文件里有什么」，不是事实本身
+META_WORDS = ("本文件", "该文件", "本文档", "该文档", "存在《", "设有", "涵盖", "分类索引")
+
+
+def _junk_source(name):
+    n = (name or "").strip()
+    if JUNK_NAME.match(n):
+        return True
+    return ("." + n.rsplit(".", 1)[-1].lower()) in JUNK_EXT if "." in n else False
+
+
+def _cjk(s):
+    return sum(1 for c in s if "\u4e00" <= c <= "\u9fff")
+
+
+def _clean_fact(f):
+    """返回可用 content；不可用返回 None。
+
+    模型经常把 content 写成光秃秃的值（"2019年9月3日" / "2346.57万元"），
+    这种脱离 key 就毫无意义 —— 用 key 把它补成能独立成立的句子，补不出来就丢。
+    """
+    content = (f.get("content") or "").strip()
+    key = (f.get("key") or "").strip()
+    if not content:
+        return None
+    if any(w in content for w in META_WORDS):
+        return None
+    if _cjk(content) < 6:                      # 只有数字/符号/短词
+        if not key:
+            return None
+        content = f"{key}为{content}" if not re.search(r"[是为：:]$", key) else f"{key}{content}"
+    if len(content) < 12 or len(content) > 300:
+        return None
+    return content
+
+
 def _json_out(txt):
     """模型偶尔会包 ```json，或前后带解释。只取第一个平衡的 {}。"""
     m = re.search(r"\{.*\}", txt, re.S)
@@ -89,8 +134,8 @@ def derive_one(file_id, name, summary, version, s):
 
     made = []
     for f in data["facts"][:4]:
-        content = (f.get("content") or "").strip()
-        if len(content) < 8 or len(content) > 300:
+        content = _clean_fact(f)
+        if not content:
             continue
         kind = f.get("kind") if f.get("kind") in KINDS_OK else "fact"
         try:
@@ -114,7 +159,8 @@ def run(limit=20, dry=False):
                             FROM doc_summaries ds JOIN files f ON f.id = ds.file_id
                            WHERE ds.summary IS NOT NULL AND length(ds.summary) > 60
                            ORDER BY ds.created_at DESC""")
-    todo = [(f, n, sm, v) for (f, n, sm, v) in rows if not _seen(f, v)][:limit]
+    todo = [(f, n, sm, v) for (f, n, sm, v) in rows
+            if not _seen(f, v) and not _junk_source(n)][:limit]
     print(f"待派生 {len(todo)} 份（已派生的跳过）")
     stats = {"created": 0, "superseded": 0, "rejected": 0, "updated": 0, "fail": 0}
     for i, (fid, name, summary, ver) in enumerate(todo, 1):
