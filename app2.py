@@ -785,11 +785,13 @@ def api_search():
     mode = request.args.get("mode") or "hybrid"
     limit = min(int(request.args.get("limit", 20)), 100)
     ext = (request.args.get("ext") or "").strip()
+    as_of = (request.args.get("as_of") or "").strip() or None
+    scope = (request.args.get("scope") or "default").strip()
     if not q:
         return ok(results=[], mode=mode)
     import search as S
     try:
-        r = S.search(q, mode=mode, limit=limit, ext=ext)
+        r = S.search(q, mode=mode, limit=limit, ext=ext, as_of=as_of, scope=scope)
     except Exception as e:
         return fail(f"检索失败: {e}", 500)
     return ok(**r)
@@ -799,6 +801,54 @@ def api_search():
 def api_draft_kinds():
     """文体清单，前端下拉用。"""
     return ok(kinds=[{"key": k, "name": v[0]} for k, v in assistant.KINDS.items()])
+
+
+@app.post("/api/memory/remember")
+def api_memory_remember():
+    """写入一条记忆（显式记住）。冲突时先废止旧条再建新条，不覆盖。"""
+    body = request.get_json(silent=True) or {}
+    content = (body.get("content") or "").strip()
+    if not content:
+        return fail("content 不能为空")
+    import memory as M
+    try:
+        r = M.remember(
+            content,
+            key=body.get("key"), subject=body.get("subject"),
+            kind=body.get("kind") or "fact",
+            authority=body.get("authority") or "record",
+            confidence=float(body.get("confidence") or 0.6),
+            valid_from=body.get("valid_from"), valid_to=body.get("valid_to"),
+            scope=body.get("scope") or "default",
+            source_kind=body.get("source_kind") or "manual",
+            file_id=body.get("file_id"), chunk_id=body.get("chunk_id"),
+            excerpt=body.get("excerpt"), reason=body.get("reason") or "",
+            changed_by=body.get("changed_by") or "user",
+            embed=bool(body.get("embed", True)),
+        )
+    except Exception as e:                                     # noqa: BLE001
+        return fail(f"写入失败: {type(e).__name__}: {e}", 500)
+    return ok(**r)
+
+
+@app.get("/api/memory")
+def api_memory():
+    """查记忆：给 key 看历史链；给 q 做检索；给 as_of 取「当时有效」。"""
+    import memory as M
+    key = (request.args.get("key") or "").strip()
+    q = (request.args.get("q") or "").strip()
+    as_of = (request.args.get("as_of") or "").strip() or None
+    scope = (request.args.get("scope") or "default").strip()
+    if key:
+        return ok(timeline=M.timeline(key, scope=scope))
+    if q:
+        return ok(memories=M.search(q, limit=int(request.args.get("limit", 20)),
+                                    scope=scope, as_of=as_of), as_of=as_of)
+    with db.cursor(commit=False) as con:
+        rows = con.run("""SELECT status, count(*) FROM memory_items
+                           WHERE scope_key=:sc GROUP BY 1""", sc=scope)
+        tot = con.run("SELECT count(*) FROM memory_items WHERE scope_key=:sc", sc=scope)[0][0]
+    return ok(total=int(tot), by_status={r[0]: int(r[1]) for r in rows})
 
 
 @app.get("/api/chat/stream")

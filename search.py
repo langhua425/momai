@@ -177,6 +177,94 @@ def _keyword(q, ext, limit):
     return out
 
 
+def _section_semantic(qv, ext, limit, s):
+    """章节级语义召回：章节向量是块向量均值，粒度更粗。
+
+    作用不是取代块召回，而是兜住「问题问的是整节主题」：
+    块向量容易被某一段细节带偏，章节均值更能代表「这一节在讲什么」。
+    命中的章节要映射回一个代表块，才能和块级结果一起做 RRF 融合。
+    """
+    params = {"q": db.vec_literal(qv), "l": limit}
+    ext_sql = ""
+    if ext:
+        ext_sql = " AND f.ext = :ext"
+        params["ext"] = ext
+    sql = f"""
+        SELECT s.file_id, s.title, s.start_chunk_index,
+               round(1 - (sv.embedding <=> :q::vector)::numeric, 4) AS score
+        FROM file_section_vectors sv
+        JOIN file_sections s ON s.id = sv.section_id
+        JOIN files f ON f.id = sv.file_id
+        WHERE f.status = 'parsed'{ext_sql}
+        ORDER BY sv.embedding <=> :q::vector
+        LIMIT :l"""
+    with db.cursor(commit=False) as con:
+        hits = con.run(sql, **params)
+        if not hits:
+            return []
+        out = []
+        for fid, title, start_seq, score in hits:
+            row = con.run("""
+                SELECT c.id, c.file_id, f.name, f.ext, f.path, coalesce(f.parse_kind,''),
+                       c.seq, coalesce(c.heading,''), coalesce(c.section_path,''),
+                       coalesce(c.content,''), :sc
+                FROM chunks c JOIN files f ON f.id = c.file_id
+                WHERE c.file_id=:f AND c.is_current
+                ORDER BY abs(c.seq - :seq) LIMIT 1""",
+                          f=fid, seq=(start_seq or 0), sc=float(score))
+            if row:
+                r = row[0]
+                out.append({"chunk_id": r[0], "id": r[0], "file_id": r[1], "name": r[2],
+                            "ext": r[3], "path": r[4], "parse_kind": r[5], "seq": r[6],
+                            "heading": r[7], "section_path": r[8] or title,
+                            "snippet": (r[9] or "")[:600], "content": (r[9] or ""),
+                            "vscore": float(score), "kscore": 0.0, "khits": 0,
+                            "section_hit": True})
+    return out
+
+
+def _memory_route(q, limit, as_of=None, scope="default"):
+    """记忆路：把「记忆命中的证据块」送进 RRF，记忆本体单独返回。
+
+    为什么不把记忆条目当检索结果：记忆是**事实**（一句话），检索结果是
+    **文档块**（可回原文）。粒度不同，混在一个列表里用户没法点。
+    所以记忆本体走 memories 字段，它的证据块参与排序——
+    「某条事实成立」会把它出处的原文顶上来。
+
+    as_of 只在记忆路生效：文档块没有「何时成立」的语义，
+    给块硬套时间过滤等于编造。
+    """
+    import memory as M
+    try:
+        mems = M.search(q, limit=max(5, limit // 2), as_of=as_of, scope=scope)
+    except Exception as e:                                     # noqa: BLE001
+        return [], [], f"记忆检索跳过: {type(e).__name__}: {e}"
+    if not mems:
+        return [], [], ""
+    ids = [m["id"] for m in mems]
+    with db.cursor(commit=False) as con:
+        rows = con.run("""
+            SELECT DISTINCT ON (c.id)
+                   c.id, c.file_id, f.name, f.ext, f.path, coalesce(f.parse_kind,''),
+                   c.seq, coalesce(c.heading,''), coalesce(c.section_path,''),
+                   coalesce(c.content,''), e.memory_id
+            FROM memory_evidence e
+            JOIN chunks c ON c.id = e.chunk_id AND c.is_current
+            JOIN files f ON f.id = c.file_id
+            WHERE e.memory_id = ANY(:ids)
+            ORDER BY c.id""", ids=ids)
+    score_by_mem = {m["id"]: m["score"] for m in mems}
+    out = []
+    for r in rows:
+        out.append({"chunk_id": r[0], "id": r[0], "file_id": r[1], "name": r[2], "ext": r[3],
+                    "path": r[4], "parse_kind": r[5], "seq": r[6], "heading": r[7],
+                    "section_path": r[8], "snippet": (r[9] or "")[:600],
+                    "content": (r[9] or ""),
+                    "vscore": 0.6, "kscore": float(score_by_mem.get(r[10], 0.0)),
+                    "khits": 1, "memory_hit": True})
+    return out, mems, ""
+
+
 def _rrf(lists, weights=None):
     """加权 RRF：score = Σ w/(k + rank)，按 chunk_id 合并。
 
@@ -206,7 +294,7 @@ def _rrf(lists, weights=None):
     return [fused[cid] for cid in order]
 
 
-def search(q, mode="hybrid", limit=20, ext="", do_rerank=None):
+def search(q, mode="hybrid", limit=20, ext="", do_rerank=None, as_of=None, scope="default"):
     s = ingest.settings()
     limit = max(1, min(int(limit or 20), 100))
     cand = max(CANDIDATES, limit)
@@ -215,6 +303,7 @@ def search(q, mode="hybrid", limit=20, ext="", do_rerank=None):
 
     weights = []
     routes = {}
+    memories = []
     if mode in ("hybrid", "semantic"):
         try:
             qv = ingest.embed_texts([q], s)[0]
@@ -241,6 +330,34 @@ def search(q, mode="hybrid", limit=20, ext="", do_rerank=None):
             except Exception as e:                            # noqa: BLE001
                 err = (err + "；" if err else "") + f"名字通道跳过: {e}"
 
+        # 章节级召回（T2.4）：权重低于块级——它是「整节主题」的补充视角
+        if s.get("section_recall_enabled", True):
+            try:
+                sec_rows = _section_semantic(qv, ext, cand, s)
+                if sec_rows:
+                    lists.append(sec_rows)
+                    weights.append(float(s.get("section_recall_weight", 0.5) or 0.5))
+                    routes["section_vector"] = len(sec_rows)
+            except Exception as e:                            # noqa: BLE001
+                err = (err + "；" if err else "") + f"章节召回跳过: {type(e).__name__}: {e}"
+
+        # 记忆路（第四路）：只在 hybrid 下参与，权重 0.5 —— 记忆是辅助证据，不该压过原文
+        if s.get("memory_recall_enabled", True):
+            try:
+                mem_rows, mems, m_err = _memory_route(q, limit, as_of=as_of, scope=scope)
+                if mem_rows:
+                    lists.append(mem_rows)
+                    # 权重必须 >1：记忆路通常只出 1–3 条，RRF 下 0.5/(60+1) 会被
+                    # 50 条向量候选里最差的一条(1/110)压过去，证据块永远顶不上来。
+                    # 记忆是人工确认过的事实，精度高于召回率，值得压过普通块。
+                    weights.append(float(s.get("memory_recall_weight", 1.6) or 1.6))
+                    routes["memory"] = len(mem_rows)
+                memories = mems
+                if m_err:
+                    err = (err + "；" if err else "") + m_err
+            except Exception as e:                            # noqa: BLE001
+                err = (err + "；" if err else "") + f"记忆路跳过: {e}"
+
     rows = _rrf(lists, weights) if len(lists) > 1 else (lists[0] if lists else [])
     rows.sort(key=lambda x: -x.get("score", 0))
 
@@ -261,6 +378,18 @@ def search(q, mode="hybrid", limit=20, ext="", do_rerank=None):
                 rows = reranked
         except Exception as e:      # noqa: BLE001
             err = (err + "；" if err else "") + f"重排跳过: {e}"
+
+    # 记忆命中的证据文件必须露出：重排器只判「与查询字面相关」，不认「这条事实被确认过」，
+    # 聚合又只留同文件最高分块 —— 两者叠加会把记忆证据彻底埋掉。
+    # 所以记忆命中单独补位：其证据文件若不在最终结果里，前置插入并标记 via=memory。
+    _mem_files = []
+    for m in (memories or []):
+        _mid = m.get("id")
+        with db.cursor(commit=False) as con:
+            rr_ = con.run("""SELECT DISTINCT c.file_id FROM memory_evidence e
+                               JOIN chunks c ON c.id=e.chunk_id AND c.is_current
+                              WHERE e.memory_id=:m LIMIT 2""", m=_mid)
+        _mem_files += [r[0] for r in rr_]
 
     # 文档级聚合：同一文件只出一条（取分数最高的块），其余命中数并入 other_hits。
     # 原因：块级并列会让同一份报告在结果里出现 2–3 次，看起来像重复；而检索的目的是找文档。
@@ -289,6 +418,32 @@ def search(q, mode="hybrid", limit=20, ext="", do_rerank=None):
             "other_hits": 0,
             "source": "rerank" if "rerank_score" in r else ("hybrid" if len(lists) > 1 else mode),
         })
+    if _mem_files:
+        have = {r["file_id"] for r in out}
+        extra = []
+        for fid in _mem_files:
+            if fid in have or len(extra) >= 2:
+                continue
+            with db.cursor(commit=False) as con:
+                r = con.run("""SELECT c.id, c.file_id, f.name, f.ext, f.path, coalesce(f.parse_kind,''),
+                                      c.seq, coalesce(c.heading,''), coalesce(c.section_path,''),
+                                      coalesce(c.content,'')
+                                 FROM chunks c JOIN files f ON f.id=c.file_id
+                                WHERE c.file_id=:f AND c.is_current
+                                ORDER BY c.seq LIMIT 1""", f=fid)
+            if not r:
+                continue
+            x = r[0]
+            extra.append({"chunk_id": x[0], "file_id": x[1], "name": x[2], "ext": x[3],
+                          "path": x[4], "parse_kind": x[5], "seq": x[6], "heading": x[7],
+                          "section_path": x[8], "snippet": (x[9] or "")[:600],
+                          "content": x[9] or "", "score": 0.0, "rerank_score": None,
+                          "vscore": 0.0, "kscore": 0.0, "khits": 0,
+                          "other_hits": 0, "source": "memory"})
+        if extra:
+            out = (extra + out)[:limit]
+
     return {"results": out, "count": len(out), "mode": mode,
             "reranked": any(x["rerank_score"] is not None for x in out),
-            "routes": routes, "error": err}
+            "routes": routes, "error": err,
+            "memories": memories, "as_of": as_of}
