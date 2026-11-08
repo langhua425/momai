@@ -47,6 +47,7 @@ def static_files(fn):
 
 # ---------- MCP（streamable HTTP）：对外暴露 lingxi 工具 ----------
 @app.route("/mcp/lingxi", methods=["POST", "GET", "OPTIONS"])
+@app.route("/mcp/momai", methods=["POST", "GET", "OPTIONS"])   # 新名；旧端点保留，老客户端不用改
 def mcp_lingxi():
     import mcp_lingxi as ml
     if request.method == "OPTIONS":

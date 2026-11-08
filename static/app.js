@@ -86,8 +86,8 @@ const state = { pages: [], reports: [], status: null, settings: null };
 async function loadStatus() {
   const { status } = await api("/api/status");
   state.status = status;
-  $("#site-title").textContent = status.site_title || "灵犀文脉";
-  document.title = (status.site_title || "灵犀文脉") + " · NAS";
+  $("#site-title").textContent = status.site_title || "墨脉";
+  document.title = (status.site_title || "墨脉") + " · NAS";
   const cards = [
     ["页面", fmt(status.pages)], ["论断 claims", fmt(status.claims)],
     ["文本块 chunks", fmt(status.chunks)], ["已向量化", fmt(status.embedded)],

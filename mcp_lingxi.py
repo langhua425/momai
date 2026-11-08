@@ -1,4 +1,4 @@
-"""MCP（streamable HTTP）端点：/mcp/lingxi
+"""MCP（streamable HTTP）端点：/mcp/momai（兼容旧名 /mcp/lingxi）
 
 对外暴露两个工具，与原 WinClaw 灵犀文脉同口径，任何 MCP 客户端
 （Hermes / Claude Code / Codex / winclaw）都能直接挂上来。
@@ -14,13 +14,13 @@ import db
 import search as wm_search
 import assistant as wm_assistant
 
-SERVER_NAME = "wenmai-lingxi"
+SERVER_NAME = "momai"
 SERVER_VERSION = "1.0.0"
 PROTOCOL = "2025-06-18"
 
 TOOLS = [
     {
-        "name": "lingxi_search",
+        "name": "momai_search",
         "description": "在文脉资料库（workhome 全库 + 压缩包内文件）做语义/关键词混合检索，"
                        "返回文件路径、命中片段、相关度得分。",
         "inputSchema": {
@@ -35,7 +35,7 @@ TOOLS = [
         },
     },
     {
-        "name": "lingxi_read_document",
+        "name": "momai_read_document",
         "description": "按 file_id 或路径读取文档全文（由已解析文本块拼回），用于检索命中后看上下文。",
         "inputSchema": {
             "type": "object",

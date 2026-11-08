@@ -1,4 +1,4 @@
-"""灵犀文脉（NAS 版）— Flask 后端 API + 静态前端。"""
+"""墨脉（NAS 版）— Flask 后端 API + 静态前端。"""
 import os
 import json
 import re
@@ -341,7 +341,7 @@ def bootstrap():
     for sub in ("entities", "concepts", "syntheses", "sources", "reports", ".wenmai", "_attachments"):
         os.makedirs(os.path.join(v, sub), exist_ok=True)
     for fn, text in (
-        ("WIKI.md", "# 灵犀文脉\n\n本库由 NAS 上的「灵犀文脉」服务编译维护。\n"),
+        ("WIKI.md", "# 墨脉\n\n本库由 NAS 上的「墨脉」服务编译维护。\n"),
         ("AGENTS.md", "# 使用约定\n\n- 页面 frontmatter 里写 claims（含 evidence）才会进结构化论断层。\n- reports/ 由编译自动生成。\n"),
         ("index.md", "---\nid: concept.index\nkind: concept\ntitle: 索引\n---\n\n# 索引\n\n编译后自动列出所有页面。\n"),
     ):
