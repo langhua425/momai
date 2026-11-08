@@ -994,6 +994,25 @@ def api_search_legacy():
     return ok(results=results[:limit], mode=mode, count=len(results))
 
 
+@app.get("/api/recommendations")
+def api_recommendations():
+    import recommend as R
+    rows = R.list_open(limit=int(request.args.get("limit", 20)),
+                       kind=(request.args.get("kind") or "").strip() or None)
+    return ok(items=[{"id": r[0], "kind": r[1], "file_id": r[2], "title": r[3],
+                      "reason": r[4], "confidence": float(r[5] or 0),
+                      "name": r[6], "path": r[7]} for r in rows])
+
+
+@app.post("/api/recommendations/<int:rid>/<action>")
+def api_recommendation_action(rid, action):
+    if action not in ("act", "dismiss"):
+        return fail("action 只能是 act 或 dismiss")
+    import recommend as R
+    R.mark(rid, "acted" if action == "act" else "dismissed")
+    return ok(id=rid, action=action)
+
+
 @app.get("/api/files")
 def api_files():
     status = request.args.get("status")
@@ -1016,6 +1035,12 @@ def api_files():
 
 @app.get("/api/files/<int:fid>")
 def api_file(fid):
+    # 浏览记录是推荐规则的输入（new_related 靠它知道「我最近在看什么」）
+    try:
+        import recommend as R
+        R.record_view(fid)
+    except Exception:                                          # noqa: BLE001
+        pass
     with db.cursor(commit=False) as con:
         r = con.run("""SELECT id,name,path,real_path,ext,size,status,parse_kind,text_bytes,
                               content_hash,container_id,depth,error,updated_at FROM files WHERE id=:i""", i=fid)

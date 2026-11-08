@@ -80,7 +80,7 @@
 |---|---|---|
 | 5.2 | **实体向量 + 2-hop 扩展**（先做） | ✅ 518/518 实体已嵌入（`名称 · 类型`，不带 props——结构信号掺进嵌入会污染语义）；2-hop 衰减 1.0/0.6/0.3，权重 0.4。隔离 A/B（n=139）：**块级 Recall 0.576→0.604（+2.8pt）、文档 0.727→0.741**。正向但幅度小，值不值得再调 3-hop 见下 |
 | 5.1 | graphs / graph_subviews 多图多视图 | ⬜ 未开始。LightRAG 只做实体抽取不做社区摘要；GraphRAG 全量重建在 5,000+ 文档规模不可行 |
-| 4.2 | recommendations：规则优先（新入库相关/同项目配套缺件/长期未访问）+ confidence + reason + acted_at | 主动性系统研究：是否需要 LLM 决策存疑，规则+反馈闭环成本更低 |
+| 5.3 | **recommendations：规则优先**（新入库相关 / 同目录配套缺件 / 长期未访问）+ confidence + reason + acted_at | ✅ 三条规则零 LLM。实测：doc_gap 9 条、stale_value 5 条。**幂等的陷阱**：source_hash 若把理由文本算进去，措辞一变（冷启动→正常态）同一文件会被重插一遍 → 身份只取 `(kind, file_id)`，另加 open 态唯一索引，且必须用裸 `ON CONFLICT DO NOTHING`（指定单列会漏掉第二个唯一约束）。冷启动保护：没有任何浏览记录时「从没看过」对所有文件都成立，规则退化成品味很差的 Top10 |
 | 4.3 | work_brief_auto：夜间生成，source_hash 幂等 | 同窗口同内容不重生成 |
 
 ## 明确不做
