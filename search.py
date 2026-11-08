@@ -265,6 +265,76 @@ def _memory_route(q, limit, as_of=None, scope="default"):
     return out, mems, ""
 
 
+def _graph_route(qv, ext, limit, s):
+    """实体图谱 2-hop 扩展召回。
+
+    信号链：查询向量 → 种子实体 → 1 跳邻居 → 2 跳邻居 → 这些实体被提及的块。
+
+    为什么是 2 跳：1 跳只能拿到直接关联（问「静湖水质」找不出「排口巡查」）；
+    3 跳会把整个图谱拖进来，噪声压过信号。2 跳是「邻居的邻居」，
+    刚好是「相关但不同主题」的边界。
+
+    衰减 1.0 / 0.6 / 0.3：每多一跳，与原始问题的关联就弱一档；
+    不衰减的话 2 跳噪声会和种子实体同权，等于没做相关性排序。
+    """
+    k_seed = int(s.get("graph_seed_k", 8) or 8)
+    k_hop = int(s.get("graph_hop_k", 60) or 60)
+    thr = float(s.get("graph_seed_min_sim", 0.45) or 0.45)
+    params = {"q": db.vec_literal(qv), "ks": k_seed, "kh": k_hop, "thr": thr, "l": limit}
+    ext_sql = ""
+    if ext:
+        ext_sql = " AND f.ext = :ext"
+        params["ext"] = ext
+    sql = f"""
+        WITH seeds AS (
+            SELECT id, 1 - (embedding <=> :q::vector) AS sim
+            FROM entities
+            WHERE embedding IS NOT NULL AND 1 - (embedding <=> :q::vector) >= :thr
+            ORDER BY embedding <=> :q::vector
+            LIMIT :ks
+        ), h1 AS (
+            SELECT r.dst_id AS id, s.sim * 0.6 AS sc
+              FROM relations r JOIN seeds s ON r.src_id = s.id
+            UNION ALL
+            SELECT r.src_id, s.sim * 0.6
+              FROM relations r JOIN seeds s ON r.dst_id = s.id
+        ), h1u AS (SELECT id, max(sc) AS sc FROM h1 GROUP BY id
+                   ORDER BY 2 DESC LIMIT :kh),
+        h2 AS (
+            SELECT r.dst_id AS id, h.sc * 0.5 AS sc
+              FROM relations r JOIN h1u h ON r.src_id = h.id
+            UNION ALL
+            SELECT r.src_id, h.sc * 0.5
+              FROM relations r JOIN h1u h ON r.dst_id = h.id
+        ), scored AS (
+            SELECT id, sim AS sc FROM seeds
+            UNION ALL SELECT id, sc FROM h1u
+            UNION ALL SELECT id, max(sc) FROM h2 GROUP BY id
+        ), top AS (
+            SELECT id, max(sc) AS sc FROM scored GROUP BY id
+            ORDER BY 2 DESC LIMIT :kh
+        )
+        SELECT c.id, c.file_id, f.name, f.ext, f.path, coalesce(f.parse_kind,''),
+               c.seq, coalesce(c.heading,''), coalesce(c.section_path,''),
+               coalesce(c.content,''), max(t.sc) AS gsc
+          FROM top t
+          JOIN entity_mentions m ON m.entity_id = t.id
+          JOIN chunks c ON c.id = m.chunk_id AND c.is_current
+          JOIN files f ON f.id = c.file_id
+         WHERE f.status = 'parsed'{ext_sql}
+         GROUP BY c.id, c.file_id, f.name, f.ext, f.path, f.parse_kind,
+                  c.seq, c.heading, c.section_path, c.content
+         ORDER BY gsc DESC
+         LIMIT :l"""
+    with db.cursor(commit=False) as con:
+        rows = con.run(sql, **params)
+    return [{"chunk_id": r[0], "id": r[0], "file_id": r[1], "name": r[2], "ext": r[3],
+             "path": r[4], "parse_kind": r[5], "seq": r[6], "heading": r[7],
+             "section_path": r[8], "snippet": (r[9] or "")[:600], "content": (r[9] or ""),
+             "vscore": float(r[10] or 0), "kscore": 0.0, "khits": 0, "graph_hit": True}
+            for r in rows]
+
+
 def _rrf(lists, weights=None):
     """加权 RRF：score = Σ w/(k + rank)，按 chunk_id 合并。
 
@@ -340,6 +410,18 @@ def search(q, mode="hybrid", limit=20, ext="", do_rerank=None, as_of=None, scope
                     routes["section_vector"] = len(sec_rows)
             except Exception as e:                            # noqa: BLE001
                 err = (err + "；" if err else "") + f"章节召回跳过: {type(e).__name__}: {e}"
+
+        # 实体图谱 2-hop（T5.2）：权重低于原文召回——它是「顺着关系找相关」，
+        # 适合补召回，不适合抢排名
+        if s.get("graph_recall_enabled", True):
+            try:
+                g_rows = _graph_route(qv, ext, cand, s)
+                if g_rows:
+                    lists.append(g_rows)
+                    weights.append(float(s.get("graph_recall_weight", 0.4) or 0.4))
+                    routes["graph"] = len(g_rows)
+            except Exception as e:                            # noqa: BLE001
+                err = (err + "；" if err else "") + f"图谱召回跳过: {type(e).__name__}: {e}"
 
         # 记忆路（第四路）：只在 hybrid 下参与，权重 0.5 —— 记忆是辅助证据，不该压过原文
         if s.get("memory_recall_enabled", True):
